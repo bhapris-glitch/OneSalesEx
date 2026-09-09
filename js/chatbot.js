@@ -2,7 +2,7 @@
   const API=window.LAYBOKA_API||'';
   const merchantId=localStorage.lbMerchantId||'';
   const root=document.createElement('div');
-  root.innerHTML=`<button class="lb-launcher" aria-label="Open Layboka assistant">✦</button><section class="lb-chat" aria-label="Layboka AI chat"><header><span class="lb-avatar" id="lbAvatar">✦</span><strong id="lbTitle">Emily · Layboka AI</strong><button class="lb-close">×</button></header><div class="lb-messages"><p class="lb-assistant" id="lbWelcome">Hi! I’m Emily. How can I help you shop today?</p></div><form><input placeholder="Ask about products…" autocomplete="off"><button>Send</button></form></section>`;
+  root.innerHTML=`<button class="lb-launcher" aria-label="Open Layboka assistant"><span>✦</span></button><section class="lb-chat" aria-label="Layboka AI chat"><header><span class="lb-avatar" id="lbAvatar">♙</span><div class="lb-heading"><strong id="lbTitle">AI Sales Executive</strong><small><span class="lb-online-dot"></span> Online now</small></div><div class="lb-header-actions"><button class="lb-minimize" aria-label="Minimize chat">−</button><button class="lb-close" aria-label="Close chat">×</button></div></header><div class="lb-messages"><p class="lb-assistant" id="lbWelcome">Hi! 👋 I’m your AI Sales Executive. How can I help you find the perfect product today?</p></div><form><input placeholder="Ask about our products…" autocomplete="off" aria-label="Message Layboka AI"><button aria-label="Send message">➤</button></form></section>`;
   document.body.append(root);
 
   const chat=root.querySelector('.lb-chat');
@@ -13,6 +13,19 @@
   const sendButton=form.querySelector('button');
   let locked=false;
   let notice='';
+
+  const websiteAnswers=[
+    { test:/trial|free|credit card/i, answer:'You can start a 5-day Premium trial with full features and 100 AI chats. There is no charge during the trial and no credit card is required. Start from the Install section on the homepage.' },
+    { test:/price|pricing|cost|starter|growth|premium|plan/i, answer:'Layboka plans are Starter at $25/month with 600 AI conversations, Growth at $59/month with 1,400 conversations, and Premium at $149/month with 2,300 conversations. You can cancel anytime.' },
+    { test:/install|shopify|connect|setup/i, answer:'Installation starts in the Install section: enter your Shopify store URL and working email, click Install, then approve the Shopify installation. No developer is required.' },
+    { test:/feature|what.*do|recommend|cart|upsell/i, answer:'Layboka chats with shoppers, recommends products, supports upsells and cross-sells, helps recover abandoned carts, matches your brand voice, and provides live sales insights around the clock.' },
+    { test:/enterprise|high.?volume|custom/i, answer:'Enterprise includes custom AI configuration, a dedicated support team, and integrations with CRM, ERP, inventory, and other business systems. Request a consultation on the Enterprise page.' },
+    { test:/support|contact|email|help/i, answer:'For support, installation, pricing, or enterprise questions, contact support@layboka.ai from the Contact page.' },
+    { test:/cancel|change.*plan|upgrade/i, answer:'You can change or upgrade your plan whenever your store is ready, and plans can be canceled anytime.' },
+    { test:/about|who are|layboka/i, answer:'Layboka AI is an always-on AI Sales Executive for Shopify merchants, helping shoppers discover products, make confident decisions, and complete purchases.' }
+  ];
+
+  const getWebsiteAnswer=(text)=>websiteAnswers.find(({test})=>test.test(text))?.answer;
 
   const addMessage=(text,kind='assistant')=>{
     const p=document.createElement('p');
@@ -45,7 +58,7 @@
     const usage=Number(data.usage||0);
     const limit=Number(data.limit||100);
 
-    root.querySelector('#lbTitle').textContent=`${data.settings.agentName} · ${data.settings.storeName}`;
+      root.querySelector('#lbTitle').textContent=`${data.settings.agentName} · ${data.settings.storeName}`;
     root.querySelector('#lbWelcome').textContent=data.settings.welcomeMessage;
     root.style.setProperty('--orange',data.settings.themeColor);
     if(data.settings.agentPic){
@@ -87,6 +100,7 @@
 
   launcher.onclick=()=>chat.classList.toggle('open');
   root.querySelector('.lb-close').onclick=()=>chat.classList.remove('open');
+  root.querySelector('.lb-minimize').onclick=()=>chat.classList.remove('open');
   refreshStatus();
   setInterval(refreshStatus,60000);
 
@@ -96,6 +110,11 @@
     if(!text||locked)return;
     addMessage(text,'user');
     input.value='';
+    const knownAnswer=getWebsiteAnswer(text);
+    if(knownAnswer){
+      addMessage(knownAnswer);
+      return;
+    }
     try{
       const response=await fetch(`${API}/api/chat/message`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text,merchantId,visitorId:localStorage.lbVisitorId||(localStorage.lbVisitorId=crypto.randomUUID())})});
       const data=await response.json();
