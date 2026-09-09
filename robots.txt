@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /
+Disallow: /dashboard.html
+Disallow: /admin.html
+Disallow: /backend/
+
+Sitemap: https://layboka.ai/sitemap.xml
