@@ -15,7 +15,8 @@ const plans = {
   growth: { name: 'Growth', price: 59, stripePriceId: process.env.STRIPE_GROWTH_PRICE_ID, model: 'gpt-4o-mini' },
   premium: { name: 'Premium', price: 149, stripePriceId: process.env.STRIPE_PREMIUM_PRICE_ID, model: process.env.OPENAI_PREMIUM_MODEL || 'gpt-5' }
 };
-const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
+const isRealConfigValue = (value, prefix) => Boolean(value && value.startsWith(prefix) && !value.includes('replace_me'));
+const stripe = isRealConfigValue(process.env.STRIPE_SECRET_KEY, 'sk_') ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 const chatLimits = { starter: 600, growth: 1400, premium: 2300, enterprise: Number.MAX_SAFE_INTEGER };
 const trialDays = 5;
 const trialChatLimit = 100;
@@ -180,6 +181,17 @@ app.put('/api/merchant/settings', requireDb, async (req, res) => {
   await notifyMerchant(merchant, 'Executive settings updated', 'Your Layboka AI Sales Executive settings were updated successfully.');
   json(res, 200, { success: true, settings });
 });
+app.get('/api/shopify/connect', requireDb, async (req, res) => {
+  const merchantId = String(req.query.merchantId || '');
+  if (!ObjectId.isValid(merchantId)) return json(res, 400, { error: 'A valid merchantId is required.' });
+  const merchant = await db.collection('merchants').findOne({ _id: new ObjectId(merchantId) });
+  if (!merchant?.shop) return json(res, 400, { error: 'Add your Shopify store URL before connecting.' });
+  const now = new Date();
+  const state = crypto.randomBytes(24).toString('hex');
+  await db.collection('oauth_states').insertOne({ state, shop: merchant.shop, merchantId: merchant._id, createdAt: now, expiresAt: new Date(now.getTime() + 10 * 60000) });
+  const installUrl = `https://${merchant.shop}/admin/oauth/authorize?client_id=${encodeURIComponent(process.env.SHOPIFY_API_KEY)}&scope=${encodeURIComponent(process.env.SHOPIFY_SCOPES || 'read_products,write_script_tags')}&redirect_uri=${encodeURIComponent(process.env.SHOPIFY_REDIRECT_URI)}&state=${state}`;
+  json(res, 200, { installUrl });
+});
 app.get('/api/shopify/callback', requireDb, async (req, res) => {
   const { shop, code, state, hmac } = req.query; const record = await db.collection('oauth_states').findOne({ state, shop, expiresAt: { $gt: new Date() } });
   if (!record || !code || !shop || !hmac) return res.status(400).send('Invalid or expired Shopify authorization.');
@@ -189,22 +201,29 @@ app.get('/api/shopify/callback', requireDb, async (req, res) => {
   const tokenResponse = await fetch(`https://${shop}/admin/oauth/access_token`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_id: process.env.SHOPIFY_API_KEY, client_secret: process.env.SHOPIFY_API_SECRET, code }) });
   if (!tokenResponse.ok) return res.status(502).send('Shopify token exchange failed.');
   const token = await tokenResponse.json(); await db.collection('merchants').updateOne({ _id: record.merchantId }, { $set: { shopifyAccessToken: token.access_token, shopifyScopes: token.scope, installedAt: new Date(), updatedAt: new Date() } }); await db.collection('oauth_states').deleteOne({ _id: record._id });
-  res.redirect(`${process.env.FRONTEND_URL || '/'}?shopify=connected`);
+  res.redirect(`${process.env.FRONTEND_URL || '/'}/dashboard.html?shopify=connected&merchantId=${record.merchantId}`);
 });
 app.post('/api/checkout', requireDb, async (req, res) => {
-  if (!stripe) return json(res, 503, { error: 'Stripe is not configured on the server.' });
-  const plan = plans[req.body.plan]; const email = String(req.body.email || '').trim().toLowerCase();
+  const plan = plans[req.body.plan]; const shop = normalizeShop(req.body.shop); const email = String(req.body.email || '').trim().toLowerCase();
+  if (!stripe) return json(res, 503, { error: 'Paid checkout is not configured yet. Please try the free trial or contact support.' });
   const merchantId = String(req.body.merchantId || '');
   if (!process.env.FRONTEND_URL) return json(res, 503, { error: 'FRONTEND_URL is not configured on the server.' });
   if (!plan) return json(res, 400, { error: 'Choose a valid subscription plan.' });
-  if (!plan.stripePriceId) return json(res, 503, { error: `Stripe price is not configured for the ${plan.name} plan.` });
-  if (email && !validEmail(email)) return json(res, 400, { error: 'Enter a valid billing email.' });
-  const filter = ObjectId.isValid(merchantId) ? { _id: new ObjectId(merchantId) } : (email ? { email } : { _id: new ObjectId() });
+  if (!isRealConfigValue(plan.stripePriceId, 'price_')) return json(res, 503, { error: `${plan.name} checkout is not configured yet. Please try the free trial or contact support.` });
+  if (!validEmail(email)) return json(res, 400, { error: 'Enter a valid billing email.' });
+  if (!shop) return json(res, 400, { error: 'Enter a valid Shopify store URL, such as your-store.myshopify.com.' });
+  const filter = ObjectId.isValid(merchantId) ? { _id: new ObjectId(merchantId) } : { shop };
   const merchantUpdate = { $set: { updatedAt: new Date() }, $setOnInsert: { createdAt: new Date() } };
+  merchantUpdate.$set.shop = shop;
   if (email) merchantUpdate.$set.email = email;
   const merchant = await db.collection('merchants').findOneAndUpdate(filter, merchantUpdate, { upsert: true, returnDocument: 'after' });
-  const session = await stripe.checkout.sessions.create({     mode: 'subscription', line_items: [{ price: plan.stripePriceId, quantity: 1 }], ...(email ? { customer_email: email } : {}), client_reference_id: merchant._id.toString(), metadata: { merchantId: merchant._id.toString(), plan: req.body.plan }, subscription_data: { metadata: { merchantId: merchant._id.toString(), plan: req.body.plan } }, success_url: `${process.env.FRONTEND_URL}/dashboard.html?checkout=success&merchantId=${merchant._id}`, cancel_url: `${process.env.FRONTEND_URL}/pricing.html` });
-  json(res, 201, { url: session.url, merchantId: merchant._id.toString() });
+  try {
+    const session = await stripe.checkout.sessions.create({ mode: 'subscription', line_items: [{ price: plan.stripePriceId, quantity: 1 }], ...(email ? { customer_email: email } : {}), client_reference_id: merchant._id.toString(), metadata: { merchantId: merchant._id.toString(), plan: req.body.plan }, subscription_data: { metadata: { merchantId: merchant._id.toString(), plan: req.body.plan } }, success_url: `${process.env.FRONTEND_URL}/dashboard.html?checkout=success&merchantId=${merchant._id}`, cancel_url: `${process.env.FRONTEND_URL}/pricing.html` });
+    json(res, 201, { url: session.url, merchantId: merchant._id.toString() });
+  } catch (error) {
+    console.error('Stripe Checkout session failed:', error.message);
+    json(res, 502, { error: 'Stripe could not start checkout. Confirm the Stripe secret key and the selected plan price ID are configured correctly.' });
+  }
 });
 
 app.get('/api/merchant/billing', requireDb, async (req, res) => {
