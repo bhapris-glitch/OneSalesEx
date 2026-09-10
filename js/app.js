@@ -11,8 +11,8 @@ const addDemoMessage=(text,kind='assistant')=>{if(!demoMessages)return;const p=d
 const runDemo=question=>{if(!question)return;addDemoMessage(question,'user');setTimeout(()=>{addDemoMessage(demoReplies[question]||'I found a few personalized options based on your preferences. Here are the best matches.');if(demoMessages){const cards=document.createElement('div');cards.className='demo-products';cards.innerHTML='<article><b>✦</b><strong>Top match</strong><small>Personalized recommendation</small></article><article><b>✦</b><strong>Best seller</strong><small>Popular with similar shoppers</small></article><article><b>✦</b><strong>Great value</strong><small>Excellent everyday choice</small></article>';demoMessages.append(cards)}},350)};
 document.querySelectorAll('[data-demo-question]').forEach(button=>button.addEventListener('click',()=>{demoInput.value=button.dataset.demoQuestion;runDemo(button.dataset.demoQuestion);demoInput.value=''}));
 document.getElementById('demoForm')?.addEventListener('submit',event=>{event.preventDefault();const question=demoInput.value.trim();runDemo(question);demoInput.value=''});
-const calculateRevenue=()=>{const visitors=Number(document.getElementById('visitorInput')?.value||0);const rate=Number(document.getElementById('conversionInput')?.value||0);const aov=Number(document.getElementById('aovInput')?.value||0);const result=document.getElementById('revenueResult');if(result)result.textContent=`$${Math.round(visitors*Math.max(0,0.5/100)*aov).toLocaleString()}`};
-['visitorInput','conversionInput','aovInput'].forEach(id=>document.getElementById(id)?.addEventListener('input',calculateRevenue));
+const calculateMissedSales=()=>{const price=Number(document.getElementById('productPriceInput')?.value||0);const customers=Number(document.getElementById('missedCustomersInput')?.value||0);const result=document.getElementById('missedSalesResult');if(result)result.textContent=`$${Math.round(Math.max(0,price)*Math.max(0,customers)).toLocaleString()}`};
+['productPriceInput','missedCustomersInput'].forEach(id=>document.getElementById(id)?.addEventListener('input',calculateMissedSales));
 const menu=document.querySelector('.menu-toggle');
 const links=document.querySelector('.nav-links');
 if(menu&&links) menu.addEventListener('click',()=>{
@@ -57,3 +57,11 @@ if(form) form.addEventListener('submit',async event=>{
     if(data.installUrl) window.location.href=data.installUrl;
   }catch(error){status.textContent=error.message+' You can try again or contact support.';}
 });
+
+const loginPanel=document.getElementById('merchant-login');
+const loginForm=document.getElementById('loginForm');
+const openLogin=()=>{if(!loginPanel)return;loginPanel.classList.add('open');loginPanel.setAttribute('aria-hidden','false');document.getElementById('loginEmail')?.focus()};
+document.querySelectorAll('a[href="#merchant-login"]').forEach(link=>link.addEventListener('click',event=>{event.preventDefault();openLogin()}));
+loginPanel?.querySelector('.login-close')?.addEventListener('click',()=>{loginPanel.classList.remove('open');loginPanel.setAttribute('aria-hidden','true')});
+loginPanel?.addEventListener('click',event=>{if(event.target===loginPanel){loginPanel.classList.remove('open');loginPanel.setAttribute('aria-hidden','true')}});
+loginForm?.addEventListener('submit',event=>{event.preventDefault();const email=document.getElementById('loginEmail').value.trim();if(email)localStorage.setItem('lbLoginEmail',email);window.location.assign(`dashboard.html${localStorage.getItem('lbMerchantId')?`?merchantId=${encodeURIComponent(localStorage.getItem('lbMerchantId'))}`:''}`)});
