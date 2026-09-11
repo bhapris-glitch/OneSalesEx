@@ -23,7 +23,7 @@ const trialChatLimit = 100;
 const trialPlan = 'premium';
 const isTrialActive = (merchant) => merchant?.trialStatus === 'active' && merchant.trialEndsAt && new Date(merchant.trialEndsAt) > new Date();
 const isPaid = (merchant) => ['active', 'trialing'].includes(merchant?.subscriptionStatus) && merchant?.stripeSubscriptionId;
-const defaultSettings = { agentName: 'Emily', agentPic: '', storeName: 'Layboka AI', themeColor: '#FF4616', behavior: 'Friendly, helpful, concise, and focused on improving sales.', welcomeMessage: 'Hi! I’m Emily. How can I help you shop today?' };
+const defaultSettings = { agentName: 'Emily', agentPic: '', storeName: 'Layboka AI', themeColor: '#FF4616', primaryColor: '#FF4616', chatBackground: '#0D1009', accentColor: '#39D353', behavior: 'Friendly, helpful, concise, and focused on improving sales.', welcomeMessage: 'Hi! I’m Emily. How can I help you shop today?' };
 const mongo = new MongoClient(process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017');
 let db;
 
@@ -45,6 +45,15 @@ const normalizeShop = (value) => {
   }
 };
 const requireDb = (req, res, next) => db ? next() : json(res, 503, { error: 'Database is not connected.' });
+const requireMerchantSession = async (req, res, next) => {
+  const merchantId = String(req.query.merchantId || req.body?.merchantId || '');
+  const session = String(req.headers['x-merchant-session'] || req.query.session || '');
+  if (!ObjectId.isValid(merchantId) || !session) return json(res, 401, { error: 'Please log in with your Shopify store URL and merchant email.' });
+  const record = await db.collection('merchant_sessions').findOne({ session, merchantId: new ObjectId(merchantId), expiresAt: { $gt: new Date() } });
+  if (!record) return json(res, 401, { error: 'Your merchant session has expired. Please log in again.' });
+  req.merchantId = record.merchantId;
+  next();
+};
 
 // Email is optional: configure Resend in the environment for automatic notifications.
 const sendEmail = async ({ to, subject, html }) => {
@@ -140,16 +149,29 @@ app.post('/api/install', requireDb, async (req, res) => {
   const now = new Date();
   const result = await db.collection('merchants').findOneAndUpdate({ shop }, { $set: { shop, email, updatedAt: now }, $setOnInsert: { createdAt: now, trialStatus: 'active', trialPlan, trialChatLimit, trialEndsAt: new Date(now.getTime() + trialDays * 86400000) } }, { upsert: true, returnDocument: 'after' });
   const state = crypto.randomBytes(24).toString('hex'); await db.collection('oauth_states').insertOne({ state, shop, merchantId: result._id, createdAt: now, expiresAt: new Date(now.getTime() + 10 * 60000) });
+  const session = crypto.randomBytes(32).toString('hex');
+  await db.collection('merchant_sessions').insertOne({ session, merchantId: result._id, createdAt: now, expiresAt: new Date(now.getTime() + 7 * 86400000) });
   const installUrl = `https://${shop}/admin/oauth/authorize?client_id=${encodeURIComponent(process.env.SHOPIFY_API_KEY)}&scope=${encodeURIComponent(process.env.SHOPIFY_SCOPES || 'read_products,write_script_tags')}&redirect_uri=${encodeURIComponent(process.env.SHOPIFY_REDIRECT_URI)}&state=${state}`;
   const merchant = result.value || result;
   if (!merchant.trialStartEmailSent) {
     await db.collection('merchants').updateOne({ _id: merchant._id }, { $set: { trialStartEmailSent: true } });
     await trialEmail(merchant, 'Your Premium trial has started', 'Your 5-day Premium trial is active with full Premium features and 100 AI chats. No charge will be made during the trial.');
   }
-  json(res, 201, { success: true, merchantId: merchant._id.toString(), trialDays, trialPlan, trialChatLimit, message: 'Your 5-day Premium trial is ready with full features and 100 AI chats. Continue to Shopify to approve the app.', installUrl });
+  json(res, 201, { success: true, merchantId: merchant._id.toString(), session, trialDays, trialPlan, trialChatLimit, message: 'Your 5-day Premium trial is ready with full features and 100 AI chats. Continue to Shopify to approve the app.', installUrl });
 });
 
-app.get('/api/merchant/settings', requireDb, async (req, res) => {
+app.post('/api/merchant/login', requireDb, async (req, res) => {
+  const shop = normalizeShop(req.body.shop);
+  const email = String(req.body.email || '').trim().toLowerCase();
+  if (!shop || !validEmail(email)) return json(res, 400, { error: 'Enter the Shopify store URL and email used during installation.' });
+  const merchant = await db.collection('merchants').findOne({ shop, email });
+  if (!merchant) return json(res, 401, { error: 'That Shopify store URL and email do not match a merchant account.' });
+  const session = crypto.randomBytes(32).toString('hex');
+  await db.collection('merchant_sessions').insertOne({ session, merchantId: merchant._id, createdAt: new Date(), expiresAt: new Date(Date.now() + 7 * 86400000) });
+  json(res, 200, { success: true, merchantId: merchant._id.toString(), session });
+});
+
+app.get('/api/merchant/settings', requireDb, requireMerchantSession, async (req, res) => {
   const id = String(req.query.merchantId || '');
   if (!ObjectId.isValid(id)) return json(res, 400, { error: 'A valid merchantId is required.' });
   const merchant = await db.collection('merchants').findOne({ _id: new ObjectId(id) });
@@ -172,16 +194,17 @@ app.get('/api/merchant/settings', requireDb, async (req, res) => {
     model: trial || (paid && effectivePlan === 'premium') ? plans.premium.model : (plans[effectivePlan]?.model || 'gpt-4o-mini')
   });
 });
-app.put('/api/merchant/settings', requireDb, async (req, res) => {
+app.put('/api/merchant/settings', requireDb, requireMerchantSession, async (req, res) => {
   const id = String(req.body.merchantId || '');
   if (!ObjectId.isValid(id)) return json(res, 400, { error: 'A valid merchantId is required.' });
-  const settings = { ...defaultSettings, agentName: String(req.body.agentName || defaultSettings.agentName).slice(0, 80), agentPic: String(req.body.agentPic || '').slice(0, 500), storeName: String(req.body.storeName || defaultSettings.storeName).slice(0, 120), themeColor: /^#[0-9a-f]{6}$/i.test(req.body.themeColor) ? req.body.themeColor : defaultSettings.themeColor, behavior: String(req.body.behavior || defaultSettings.behavior).slice(0, 1000), welcomeMessage: String(req.body.welcomeMessage || defaultSettings.welcomeMessage).slice(0, 500) };
+  const color = (value, fallback) => /^#[0-9a-f]{6}$/i.test(String(value || '')) ? String(value) : fallback;
+  const settings = { ...defaultSettings, agentName: String(req.body.agentName || defaultSettings.agentName).slice(0, 80), agentPic: String(req.body.agentPic || '').slice(0, 500), storeName: String(req.body.storeName || defaultSettings.storeName).slice(0, 120), primaryColor: color(req.body.primaryColor, defaultSettings.primaryColor), chatBackground: color(req.body.chatBackground, defaultSettings.chatBackground), accentColor: color(req.body.accentColor, defaultSettings.accentColor), themeColor: color(req.body.primaryColor || req.body.themeColor, defaultSettings.themeColor), behavior: String(req.body.behavior || defaultSettings.behavior).slice(0, 1000), welcomeMessage: String(req.body.welcomeMessage || defaultSettings.welcomeMessage).slice(0, 500) };
   const merchant = await db.collection('merchants').findOne({ _id: new ObjectId(id) });
   await db.collection('merchants').updateOne({ _id: new ObjectId(id) }, { $set: { settings, updatedAt: new Date() } });
   await notifyMerchant(merchant, 'Executive settings updated', 'Your Layboka AI Sales Executive settings were updated successfully.');
   json(res, 200, { success: true, settings });
 });
-app.get('/api/shopify/connect', requireDb, async (req, res) => {
+app.get('/api/shopify/connect', requireDb, requireMerchantSession, async (req, res) => {
   const merchantId = String(req.query.merchantId || '');
   if (!ObjectId.isValid(merchantId)) return json(res, 400, { error: 'A valid merchantId is required.' });
   const merchant = await db.collection('merchants').findOne({ _id: new ObjectId(merchantId) });
@@ -226,7 +249,7 @@ app.post('/api/checkout', requireDb, async (req, res) => {
   }
 });
 
-app.get('/api/merchant/billing', requireDb, async (req, res) => {
+app.get('/api/merchant/billing', requireDb, requireMerchantSession, async (req, res) => {
   const id = String(req.query.merchantId || '');
   if (!ObjectId.isValid(id)) return json(res, 400, { error: 'A valid merchantId is required.' });
   const merchant = await db.collection('merchants').findOne({ _id: new ObjectId(id) });
