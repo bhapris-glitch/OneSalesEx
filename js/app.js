@@ -48,6 +48,7 @@ if(form) form.addEventListener('submit',async event=>{
     const data=await response.json().catch(()=>({}));
     if(!response.ok) throw new Error(data.error||`Unable to continue (HTTP ${response.status})`);
     if(data.merchantId) localStorage.setItem('lbMerchantId',data.merchantId);
+    if(data.session) localStorage.setItem('lbMerchantSession',data.session);
     if(selectedPlan){
       if(!data.url) throw new Error('Stripe Checkout URL was not returned. Check the API and Stripe price configuration.');
       window.location.assign(data.url);
@@ -64,4 +65,4 @@ const openLogin=()=>{if(!loginPanel)return;loginPanel.classList.add('open');logi
 document.querySelectorAll('a[href="#merchant-login"]').forEach(link=>link.addEventListener('click',event=>{event.preventDefault();openLogin()}));
 loginPanel?.querySelector('.login-close')?.addEventListener('click',()=>{loginPanel.classList.remove('open');loginPanel.setAttribute('aria-hidden','true')});
 loginPanel?.addEventListener('click',event=>{if(event.target===loginPanel){loginPanel.classList.remove('open');loginPanel.setAttribute('aria-hidden','true')}});
-loginForm?.addEventListener('submit',event=>{event.preventDefault();const email=document.getElementById('loginEmail').value.trim();if(email)localStorage.setItem('lbLoginEmail',email);window.location.assign(`dashboard.html${localStorage.getItem('lbMerchantId')?`?merchantId=${encodeURIComponent(localStorage.getItem('lbMerchantId'))}`:''}`)});
+loginForm?.addEventListener('submit',async event=>{event.preventDefault();const email=document.getElementById('loginEmail').value.trim();const shop=document.getElementById('loginShop').value.trim();const status=document.getElementById('loginStatus');status.textContent='Checking your merchant account…';try{const response=await fetch(`${API_BASE}/api/merchant/login`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({shop,email})});const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.error||'Store URL or email was not found.');if(data.merchantId)localStorage.setItem('lbMerchantId',data.merchantId);if(data.session)localStorage.setItem('lbMerchantSession',data.session);localStorage.setItem('lbLoginEmail',email);window.location.assign(`dashboard.html?merchantId=${encodeURIComponent(data.merchantId)}`)}catch(error){status.textContent=error.message}});
