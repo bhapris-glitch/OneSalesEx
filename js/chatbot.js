@@ -1,6 +1,7 @@
 (()=>{
   const API=window.LAYBOKA_API||'';
   const merchantId=localStorage.lbMerchantId||'';
+  const merchantSession=localStorage.lbMerchantSession||'';
   const root=document.createElement('div');
   root.innerHTML=`<button class="lb-launcher" aria-label="Open Layboka assistant"><span>✦</span></button><section class="lb-chat" aria-label="Layboka AI chat"><header><span class="lb-avatar" id="lbAvatar">♙</span><div class="lb-heading"><strong id="lbTitle">AI Sales Executive</strong><small><span class="lb-online-dot"></span> Online now</small></div><div class="lb-header-actions"><button class="lb-minimize" aria-label="Minimize chat">−</button><button class="lb-close" aria-label="Close chat">×</button></div></header><div class="lb-messages"><p class="lb-assistant" id="lbWelcome">Hi! 👋 I’m your AI Sales Executive. How can I help you find the perfect product today?</p></div><form><input placeholder="Ask about our products…" autocomplete="off" aria-label="Message Layboka AI"><button aria-label="Send message">➤</button></form></section>`;
   document.body.append(root);
@@ -93,7 +94,7 @@
   const refreshStatus=async()=>{
     if(!merchantId)return;
     try{
-      const response=await fetch(`${API}/api/merchant/settings?merchantId=${encodeURIComponent(merchantId)}`);
+      const response=await fetch(`${API}/api/merchant/settings?merchantId=${encodeURIComponent(merchantId)}`,{headers:{'x-merchant-session':merchantSession}});
       if(response.ok)applyStatus(await response.json());
     }catch{}
   };
@@ -116,7 +117,7 @@
       return;
     }
     try{
-      const response=await fetch(`${API}/api/chat/message`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text,merchantId,visitorId:localStorage.lbVisitorId||(localStorage.lbVisitorId=crypto.randomUUID())})});
+      const response=await fetch(`${API}/api/chat/message`,{method:'POST',headers:{'Content-Type':'application/json','x-merchant-session':merchantSession},body:JSON.stringify({message:text,merchantId,visitorId:localStorage.lbVisitorId||(localStorage.lbVisitorId=crypto.randomUUID())})});
       const data=await response.json();
       if(data.locked){
         setLocked(true);
