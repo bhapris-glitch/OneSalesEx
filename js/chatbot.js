@@ -50,6 +50,19 @@
     addMessage(text);
   };
 
+  const showRechargeButton=()=>{
+    if(messages.querySelector('.lb-recharge-action'))return;
+    const wrapper=document.createElement('p');
+    wrapper.className='lb-assistant lb-recharge-action';
+    const button=document.createElement('button');
+    button.type='button';
+    button.textContent='RECHARGE NOW';
+    button.addEventListener('click',()=>location.assign('dashboard.html?tab=billing'));
+    wrapper.append(button);
+    messages.append(wrapper);
+    messages.scrollTop=messages.scrollHeight;
+  };
+
   const applyStatus=(data)=>{
     if(!data?.settings)return;
     const paid=data.paid===true;
@@ -88,7 +101,8 @@
     }
 
     setLocked(true);
-    showNotice('Your 5-day Premium trial has ended. This chatbot is locked. Choose a paid plan to unlock it immediately.');
+    showNotice('Your trial period has ended. This chatbot is locked. Choose a paid plan to unlock it immediately.');
+    showRechargeButton();
   };
 
   const refreshStatus=async()=>{
