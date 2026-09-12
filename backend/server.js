@@ -18,9 +18,15 @@ const plans = {
 const isRealConfigValue = (value, prefix) => Boolean(value && value.startsWith(prefix) && !value.includes('replace_me'));
 const stripe = isRealConfigValue(process.env.STRIPE_SECRET_KEY, 'sk_') ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 const chatLimits = { starter: 600, growth: 1400, premium: 2300, enterprise: Number.MAX_SAFE_INTEGER };
-const trialDays = 5;
-const trialChatLimit = 100;
 const trialPlan = 'premium';
+const defaultTrialSettings = { days: 5, chatLimit: 100 };
+const adminKey = String(process.env.ADMIN_API_KEY || '');
+const getTrialSettings = async () => { if (!db) return defaultTrialSettings; const saved = await db.collection('platform_settings').findOne({ _id: 'trial' }); return { days: Number(saved?.days) || defaultTrialSettings.days, chatLimit: Number(saved?.chatLimit) || defaultTrialSettings.chatLimit }; };
+const requireAdmin = (req, res, next) => {
+  const supplied = String(req.headers['x-admin-key'] || '');
+  if (!adminKey || !supplied || supplied !== adminKey) return json(res, 401, { error: 'Super Admin authentication is required.' });
+  next();
+};
 const isTrialActive = (merchant) => merchant?.trialStatus === 'active' && merchant.trialEndsAt && new Date(merchant.trialEndsAt) > new Date();
 const isPaid = (merchant) => ['active', 'trialing'].includes(merchant?.subscriptionStatus) && merchant?.stripeSubscriptionId;
 const defaultSettings = { agentName: 'Emily', agentPic: '', storeName: 'Layboka AI', themeColor: '#FF4616', primaryColor: '#FF4616', chatBackground: '#0D1009', accentColor: '#39D353', behavior: 'Friendly, helpful, concise, and focused on improving sales.', welcomeMessage: 'Hi! I’m Emily. How can I help you shop today?' };
@@ -137,7 +143,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
 });
 
 app.use(express.json({ limit: '100kb' }));
-app.use((req, res, next) => { res.set('Access-Control-Allow-Origin', process.env.FRONTEND_URL || '*'); res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization'); res.set('Access-Control-Allow-Methods', 'GET,POST,OPTIONS'); req.method === 'OPTIONS' ? res.sendStatus(204) : next(); });
+app.use((req, res, next) => { res.set('Access-Control-Allow-Origin', process.env.FRONTEND_URL || '*'); res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Merchant-Session, X-Admin-Key'); res.set('Access-Control-Allow-Methods', 'GET,POST,PUT,OPTIONS'); req.method === 'OPTIONS' ? res.sendStatus(204) : next(); });
 
 app.get('/api/health', (req, res) => json(res, 200, { ok: Boolean(db), service: 'layboka-api' }));
 app.get('/api/plans', (req, res) => json(res, 200, { plans }));
@@ -147,7 +153,8 @@ app.post('/api/install', requireDb, async (req, res) => {
   if (!shop) return json(res, 400, { error: 'Enter a valid Shopify store domain, such as your-store.myshopify.com or yourstore.com.' });
   if (!validEmail(email)) return json(res, 400, { error: 'Enter a valid working email address.' });
   const now = new Date();
-  const result = await db.collection('merchants').findOneAndUpdate({ shop }, { $set: { shop, email, updatedAt: now }, $setOnInsert: { createdAt: now, trialStatus: 'active', trialPlan, trialChatLimit, trialEndsAt: new Date(now.getTime() + trialDays * 86400000) } }, { upsert: true, returnDocument: 'after' });
+  const trial = await getTrialSettings();
+  const result = await db.collection('merchants').findOneAndUpdate({ shop }, { $set: { shop, email, updatedAt: now }, $setOnInsert: { createdAt: now, trialStatus: 'pending', trialPlan } }, { upsert: true, returnDocument: 'after' });
   const state = crypto.randomBytes(24).toString('hex'); await db.collection('oauth_states').insertOne({ state, shop, merchantId: result._id, createdAt: now, expiresAt: new Date(now.getTime() + 10 * 60000) });
   const session = crypto.randomBytes(32).toString('hex');
   await db.collection('merchant_sessions').insertOne({ session, merchantId: result._id, createdAt: now, expiresAt: new Date(now.getTime() + 7 * 86400000) });
@@ -157,7 +164,7 @@ app.post('/api/install', requireDb, async (req, res) => {
     await db.collection('merchants').updateOne({ _id: merchant._id }, { $set: { trialStartEmailSent: true } });
     await trialEmail(merchant, 'Your Premium trial has started', 'Your 5-day Premium trial is active with full Premium features and 100 AI chats. No charge will be made during the trial.');
   }
-  json(res, 201, { success: true, merchantId: merchant._id.toString(), session, trialDays, trialPlan, trialChatLimit, message: 'Your 5-day Premium trial is ready with full features and 100 AI chats. Continue to Shopify to approve the app.', installUrl });
+  json(res, 201, { success: true, merchantId: merchant._id.toString(), session, trialPlan, message: 'Your Premium trial is ready. Continue to Shopify to approve the app.', installUrl });
 });
 
 app.post('/api/merchant/login', requireDb, async (req, res) => {
@@ -190,7 +197,7 @@ app.get('/api/merchant/settings', requireDb, requireMerchantSession, async (req,
     paidAt: merchant.paidAt || null,
     stripeCustomerId: merchant.stripeCustomerId || null,
     usage: merchant.chatUsage || 0,
-    limit: trial ? (merchant.trialChatLimit || trialChatLimit) : chatLimits[effectivePlan],
+    limit: trial ? (merchant.trialChatLimit || defaultTrialSettings.chatLimit) : chatLimits[effectivePlan],
     model: trial || (paid && effectivePlan === 'premium') ? plans.premium.model : (plans[effectivePlan]?.model || 'gpt-4o-mini')
   });
 });
@@ -223,7 +230,12 @@ app.get('/api/shopify/callback', requireDb, async (req, res) => {
   if (digest.length !== String(hmac).length || !crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(String(hmac)))) return res.status(400).send('Invalid Shopify signature.');
   const tokenResponse = await fetch(`https://${shop}/admin/oauth/access_token`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_id: process.env.SHOPIFY_API_KEY, client_secret: process.env.SHOPIFY_API_SECRET, code }) });
   if (!tokenResponse.ok) return res.status(502).send('Shopify token exchange failed.');
-  const token = await tokenResponse.json(); await db.collection('merchants').updateOne({ _id: record.merchantId }, { $set: { shopifyAccessToken: token.access_token, shopifyScopes: token.scope, installedAt: new Date(), updatedAt: new Date() } }); await db.collection('oauth_states').deleteOne({ _id: record._id });
+  const token = await tokenResponse.json();
+  const trial = await getTrialSettings();
+  const merchant = await db.collection('merchants').findOne({ _id: record.merchantId });
+  const trialFields = merchant?.trialStatus === 'pending' ? { trialStatus: 'active', trialPlan, trialChatLimit: trial.chatLimit, trialStartedAt: new Date(), trialEndsAt: new Date(Date.now() + trial.days * 86400000) } : {};
+  await db.collection('merchants').updateOne({ _id: record.merchantId }, { $set: { shopifyAccessToken: token.access_token, shopifyScopes: token.scope, shopifyConnected: true, installedAt: new Date(), updatedAt: new Date(), ...trialFields } });
+  await db.collection('oauth_states').deleteOne({ _id: record._id });
   res.redirect(`${process.env.FRONTEND_URL || '/'}/dashboard.html?shopify=connected&merchantId=${record.merchantId}`);
 });
 app.post('/api/checkout', requireDb, async (req, res) => {
@@ -257,26 +269,26 @@ app.get('/api/merchant/billing', requireDb, requireMerchantSession, async (req, 
   const trial = isTrialActive(merchant);
   const plan = trial ? 'premium' : (merchant.plan || 'starter');
   const paid = isPaid(merchant);
-  const limit = trial ? (merchant.trialChatLimit || trialChatLimit) : (chatLimits[plan] || chatLimits.starter);
+  const limit = trial ? (merchant.trialChatLimit || defaultTrialSettings.chatLimit) : (chatLimits[plan] || chatLimits.starter);
   const usage = merchant.chatUsageMonth === new Date().toISOString().slice(0, 7) ? (merchant.chatUsage || 0) : 0;
   json(res, 200, { plan, planName: plans[plan]?.name || plan, trialActive: trial, trialEndsAt: merchant.trialEndsAt || null, subscriptionStatus: merchant.subscriptionStatus || null, paidAt: merchant.paidAt || null, email: merchant.email || null, amount: plans[plan]?.price || null, currency: 'USD', stripeCustomerId: merchant.stripeCustomerId || null, stripeSubscriptionId: merchant.stripeSubscriptionId || null, stripeInvoiceId: merchant.stripeInvoiceId || null, model: trial || (paid && plan === 'premium') ? plans.premium.model : (plans[plan]?.model || 'gpt-4o-mini'), usage, limit, chatLocked: (!trial && !paid) || usage >= limit });
 });
-app.post('/api/chat/message', async (req, res) => {
+app.post('/api/chat/message', requireDb, requireMerchantSession, async (req, res) => {
   try {
-    const merchantId = String(req.body.merchantId || '');
-    const merchant = db && ObjectId.isValid(merchantId) ? await db.collection('merchants').findOne({ _id: new ObjectId(merchantId) }) : null;
+    const merchant = await db.collection('merchants').findOne({ _id: req.merchantId });
+    if (!merchant) return json(res, 404, { error: 'Merchant account not found.' });
     const trial = isTrialActive(merchant);
     const paid = isPaid(merchant);
-    if (merchant && !trial && !paid) return json(res, 402, { locked: true, error: 'Your 5-day trial has ended. Recharge now to unlock your AI Sales Executive.' });
+    if (!trial && !paid) return json(res, 402, { locked: true, error: 'Your trial has ended. Upgrade to unlock your AI Sales Executive.' });
     const plan = trial ? (merchant?.trialPlan || trialPlan) : (merchant?.plan || 'starter');
-    const limit = trial ? (merchant.trialChatLimit || trialChatLimit) : (chatLimits[plan] || chatLimits.starter);
+    const limit = trial ? (merchant.trialChatLimit || defaultTrialSettings.chatLimit) : (chatLimits[plan] || chatLimits.starter);
     const settings = { ...defaultSettings, ...(merchant?.settings || {}) };
     const month = new Date().toISOString().slice(0, 7);
     if (merchant && merchant.chatUsageMonth !== month) await db.collection('merchants').updateOne({ _id: merchant._id }, { $set: { chatUsage: 0, chatUsageMonth: month } });
     const currentUsage = merchant?.chatUsageMonth === month ? (merchant.chatUsage || 0) : 0;
-    if (merchant && currentUsage >= limit) return json(res, 402, { locked: true, limitReached: true, error: trial ? 'Your 5-day Premium trial includes 100 chats and has ended. Recharge Now to continue.' : `This plan has reached its ${limit.toLocaleString()} monthly AI conversation limit.` });
+    if (currentUsage >= limit) return json(res, 402, { locked: true, limitReached: true, error: trial ? 'Your trial usage limit has been reached. Upgrade to continue.' : `This plan has reached its ${limit.toLocaleString()} monthly AI conversation limit.` });
     let reply = 'I can help you discover products, compare options, understand pricing, start a 5-day trial, or learn how Layboka AI works. What would you like to know?';
-    const websiteKnowledge = `Layboka AI is an always-on AI Sales Executive for Shopify merchants. It chats with shoppers, recommends products, supports upsells and cross-sells, recovers abandoned carts, matches the merchant’s brand voice, provides live sales insights, and is available around the clock. Merchants can start a 5-day Premium trial with full features and 100 AI chats; there is no charge during the trial and no credit card is required. Installation starts from the Install section: enter a Shopify store URL and working email, then approve Shopify installation. Public monthly plans are Starter at $25/month with 600 AI conversations, Growth at $59/month with 1,400 conversations, and Premium at $149/month with 2,300 conversations. Plans can be canceled anytime. The website has Features, Pricing, Enterprise, About Us, Contact Us, Terms, Privacy, Merchant Login, and Install pages. Layboka should never claim a specific product, inventory item, discount, shipping time, refund policy, or store policy unless that information has been supplied by the connected merchant. For account, billing, Shopify installation, or support questions, direct the visitor to the relevant website page or Contact Us.`;
+    const websiteKnowledge = `Layboka AI is an always-on AI Sales Executive for Shopify merchants. It chats with shoppers, recommends products, supports upsells and cross-sells, recovers abandoned carts, matches the merchant’s brand voice, provides live sales insights, and is available around the clock. Merchants can start a Premium trial with full features; there is no charge during the trial and no credit card is required. Installation starts from the Install section: enter a Shopify store URL and working email, then approve Shopify installation. Public monthly plans are Starter at $25/month with 600 AI conversations, Growth at $59/month with 1,400 conversations, and Premium at $149/month with 2,300 conversations. Plans can be canceled anytime. The website has Features, Pricing, Enterprise, About Us, Contact Us, Terms, Privacy, Merchant Login, and Install pages. Layboka should never claim a specific product, inventory item, discount, shipping time, refund policy, or store policy unless that information has been supplied by the connected merchant. For account, billing, Shopify installation, or support questions, direct the visitor to the relevant website page or Contact Us.`;
     if (process.env.OPENAI_API_KEY) {
       const response = await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` }, body: JSON.stringify({ model: trial || plan === 'premium' ? plans.premium.model : (plans[plan]?.model || 'gpt-4o-mini'), temperature: 0.25, max_tokens: 450, messages: [{ role: 'system', content: `You are ${settings.agentName}, the helpful Layboka AI website assistant for ${settings.storeName}. ${settings.behavior} Answer accurately using the following official website information:\n${websiteKnowledge}\nAnswer the visitor directly and concisely. If the question is about a merchant's actual products, explain that product catalog access must be connected and do not invent details.` }, { role: 'user', content: String(req.body.message || '').slice(0, 2000) }] }) });
       if (response.ok) { const data = await response.json(); reply = data.choices?.[0]?.message?.content?.trim() || reply; }
@@ -294,7 +306,17 @@ app.post('/api/enterprise', requireDb, async (req, res) => {
   await db.collection('enterprise_leads').insertOne({ ...req.body, email: String(req.body.email).trim().toLowerCase(), createdAt: new Date(), status: 'new' });
   json(res, 201, { success: true, message: 'Thanks — our enterprise team will contact you within 24 hours.' });
 });
-app.get('/api/admin/metrics', requireDb, async (req, res) => {
+app.get('/api/admin/trial-settings', requireDb, requireAdmin, async (req, res) => {
+  const settings = await getTrialSettings();
+  json(res, 200, { days: settings.days, chatLimit: settings.chatLimit });
+});
+app.put('/api/admin/trial-settings', requireDb, requireAdmin, async (req, res) => {
+  const days = Math.min(30, Math.max(1, Number(req.body.days) || defaultTrialSettings.days));
+  const chatLimit = Math.min(100000, Math.max(1, Number(req.body.chatLimit) || defaultTrialSettings.chatLimit));
+  await db.collection('platform_settings').updateOne({ _id: 'trial' }, { $set: { _id: 'trial', days, chatLimit, updatedAt: new Date() } }, { upsert: true });
+  json(res, 200, { success: true, days, chatLimit });
+});
+app.get('/api/admin/metrics', requireDb, requireAdmin, async (req, res) => {
   const [merchants, activeTrials, conversations, paidMerchants, recentActivity] = await Promise.all([
     db.collection('merchants').countDocuments(),
     db.collection('merchants').countDocuments({ trialStatus: 'active', trialEndsAt: { $gt: new Date() } }),
@@ -305,7 +327,14 @@ app.get('/api/admin/metrics', requireDb, async (req, res) => {
   const revenue = await db.collection('merchants').aggregate([{ $match: { subscriptionStatus: { $in: ['active', 'trialing'] } } }, { $group: { _id: null, total: { $sum: { $ifNull: ['$monthlyRevenue', 0] } } } }]).toArray();
   json(res, 200, { metrics: { merchants, activeTrials, conversations, paidMerchants, monthlyRevenue: revenue[0]?.total || 0 }, charts: { conversations: [], conversions: [], subscriptions: [] }, recentActivity });
 });
-app.get('/api/dashboard', requireDb, async (req, res) => json(res, 200, { metrics: { conversations: await db.collection('conversations').countDocuments(), recommendedProducts: 0, cartRecovery: 0, conversionRate: '0%' }, recentActivity: [] }));
+app.get('/api/dashboard', requireDb, requireMerchantSession, async (req, res) => {
+  const merchantId = req.merchantId;
+  const [conversations, activity] = await Promise.all([
+    db.collection('activity_events').countDocuments({ merchantId, type: 'chat' }),
+    db.collection('activity_events').countDocuments({ merchantId, type: 'recommendation' })
+  ]);
+  json(res, 200, { metrics: { conversations, recommendedProducts: activity, cartRecovery: 0, conversionRate: '0%' }, recentActivity: [] });
+});
 app.use((req, res) => json(res, 404, { error: 'Route not found' }));
 
 async function start() { await mongo.connect(); db = mongo.db(process.env.MONGODB_DB || 'layboka'); await Promise.all([db.collection('merchants').createIndex({ shop: 1 }, { unique: true, sparse: true }), db.collection('oauth_states').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 })]); setInterval(() => processTrialNotifications().catch((error) => console.error('Trial notification job failed:', error.message)), 15 * 60 * 1000); await processTrialNotifications(); app.listen(port, () => console.log(`Layboka API listening on ${port}`)); }
