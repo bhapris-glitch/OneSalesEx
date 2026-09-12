@@ -14,6 +14,9 @@
   const sendButton=form.querySelector('button');
   let locked=false;
   let notice='';
+  let trialEndsAt=0;
+  let countdownMessage=null;
+  let countdownTimer=null;
 
   const websiteAnswers=[
     { test:/trial|free|credit card/i, answer:'You can start a 5-day Premium trial with full features and 100 AI chats. There is no charge during the trial and no credit card is required. Start from the Install section on the homepage.' },
@@ -50,6 +53,36 @@
     addMessage(text);
   };
 
+  const formatCountdown=(milliseconds)=>{
+    const totalSeconds=Math.max(0,Math.ceil(milliseconds/1000));
+    const hours=Math.floor(totalSeconds/3600);
+    const minutes=Math.floor((totalSeconds%3600)/60);
+    const seconds=totalSeconds%60;
+    return [hours,minutes,seconds].map(value=>String(value).padStart(2,'0')).join(':');
+  };
+
+  const updateCountdown=()=>{
+    if(!countdownMessage||!trialEndsAt)return;
+    const remaining=trialEndsAt-Date.now();
+    if(remaining<=0){
+      countdownMessage.textContent='Your trial period is ending now. Please choose a paid plan to keep your Sales Executive available.';
+      clearInterval(countdownTimer);
+      refreshStatus();
+      return;
+    }
+    countdownMessage.textContent=`Your trial ends in ${formatCountdown(remaining)}. Choose a paid plan before it ends to keep your Sales Executive available.`;
+  };
+
+  const showTrialCountdown=()=>{
+    if(countdownMessage)return;
+    countdownMessage=document.createElement('p');
+    countdownMessage.className='lb-assistant lb-countdown';
+    messages.append(countdownMessage);
+    updateCountdown();
+    countdownTimer=setInterval(updateCountdown,1000);
+    messages.scrollTop=messages.scrollHeight;
+  };
+
   const showRechargeButton=()=>{
     if(messages.querySelector('.lb-recharge-action'))return;
     const wrapper=document.createElement('p');
@@ -67,6 +100,7 @@
     if(!data?.settings)return;
     const paid=data.paid===true;
     const endsAt=data.trialEndsAt?new Date(data.trialEndsAt).getTime():0;
+    trialEndsAt=endsAt;
     const remaining=endsAt-Date.now();
     const hours=Math.ceil(remaining/3600000);
     const usage=Number(data.usage||0);
@@ -92,16 +126,14 @@
       if(usage>=limit){
         setLocked(true);
         showNotice(`Your Premium trial has used all ${limit} chats. Choose a paid plan to unlock your AI Sales Executive.`);
-      }else if(hours<=24){
-        showNotice(`Your Premium trial expires in ${Math.max(1,hours)} hour${hours===1?'':'s'}. Choose a paid plan before it ends to keep your chatbot active.`);
       }else if(hours<=48){
-        showNotice(`Your Premium trial expires in less than 48 hours. Choose a paid plan to keep your chatbot active.`);
+        showTrialCountdown();
       }
       return;
     }
 
     setLocked(true);
-    showNotice('Your trial period has ended. This chatbot is locked. Choose a paid plan to unlock it immediately.');
+    showNotice('Your trial period has ended. Your Sales Executive is not available. Choose a paid plan to handle your customers immediately.');
     showRechargeButton();
   };
 
