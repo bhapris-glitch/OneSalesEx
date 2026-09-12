@@ -28,7 +28,7 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 const isTrialActive = (merchant) => merchant?.trialStatus === 'active' && merchant.trialEndsAt && new Date(merchant.trialEndsAt) > new Date();
-const isPaid = (merchant) => ['active', 'trialing'].includes(merchant?.subscriptionStatus) && merchant?.stripeSubscriptionId;
+const isPaid = (merchant) => ['active', 'trialing'].includes(merchant?.subscriptionStatus) && merchant?.stripeSubscriptionId && (!merchant.currentPeriodEnd || new Date(merchant.currentPeriodEnd) > new Date());
 const defaultSettings = { agentName: 'Emily', agentPic: '', storeName: 'Layboka AI', themeColor: '#FF4616', primaryColor: '#FF4616', chatBackground: '#0D1009', accentColor: '#39D353', behavior: 'Friendly, helpful, concise, and focused on improving sales.', welcomeMessage: 'Hi! I’m Emily. How can I help you shop today?' };
 const mongo = new MongoClient(process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017');
 let db;
@@ -124,6 +124,9 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
             stripeCustomerId: object.customer,
             stripeSubscriptionId: object.subscription || object.id,
             subscriptionStatus: event.type === 'customer.subscription.deleted' ? 'canceled' : (event.type === 'checkout.session.completed' ? 'active' : (object.status || 'active')),
+            autopay: object.cancel_at_period_end !== true,
+            cancelAtPeriodEnd: object.cancel_at_period_end === true,
+            ...(object.current_period_end ? { currentPeriodEnd: new Date(object.current_period_end * 1000) } : {}),
             ...(object.metadata?.plan ? { plan: object.metadata.plan } : {}),
             updatedAt: new Date()
           };
@@ -261,6 +264,20 @@ app.post('/api/checkout', requireDb, async (req, res) => {
   }
 });
 
+app.put('/api/merchant/autopay', requireDb, requireMerchantSession, async (req, res) => {
+  const id = String(req.body.merchantId || '');
+  const enabled = req.body.enabled === true;
+  if (!ObjectId.isValid(id)) return json(res, 400, { error: 'A valid merchantId is required.' });
+  const merchant = await db.collection('merchants').findOne({ _id: new ObjectId(id) });
+  if (!merchant?.stripeSubscriptionId || !isPaid(merchant) || !stripe) return json(res, 400, { error: 'An active paid subscription is required to change autopay.' });
+  try {
+    const subscription = await stripe.subscriptions.update(merchant.stripeSubscriptionId, { cancel_at_period_end: !enabled });
+    const update = { autopay: enabled, cancelAtPeriodEnd: !enabled, updatedAt: new Date() };
+    if (subscription.current_period_end) update.currentPeriodEnd = new Date(subscription.current_period_end * 1000);
+    await db.collection('merchants').updateOne({ _id: merchant._id }, { $set: update });
+    json(res, 200, { success: true, autopay: enabled, cancelAtPeriodEnd: !enabled, currentPeriodEnd: update.currentPeriodEnd || merchant.currentPeriodEnd || null });
+  } catch (error) { json(res, 502, { error: 'Unable to update autopay. Please try again.' }); }
+});
 app.get('/api/merchant/billing', requireDb, requireMerchantSession, async (req, res) => {
   const id = String(req.query.merchantId || '');
   if (!ObjectId.isValid(id)) return json(res, 400, { error: 'A valid merchantId is required.' });
@@ -271,7 +288,7 @@ app.get('/api/merchant/billing', requireDb, requireMerchantSession, async (req, 
   const paid = isPaid(merchant);
   const limit = trial ? (merchant.trialChatLimit || defaultTrialSettings.chatLimit) : (chatLimits[plan] || chatLimits.starter);
   const usage = merchant.chatUsageMonth === new Date().toISOString().slice(0, 7) ? (merchant.chatUsage || 0) : 0;
-  json(res, 200, { plan, planName: plans[plan]?.name || plan, trialActive: trial, trialEndsAt: merchant.trialEndsAt || null, subscriptionStatus: merchant.subscriptionStatus || null, paidAt: merchant.paidAt || null, email: merchant.email || null, amount: plans[plan]?.price || null, currency: 'USD', stripeCustomerId: merchant.stripeCustomerId || null, stripeSubscriptionId: merchant.stripeSubscriptionId || null, stripeInvoiceId: merchant.stripeInvoiceId || null, model: trial || (paid && plan === 'premium') ? plans.premium.model : (plans[plan]?.model || 'gpt-4o-mini'), usage, limit, chatLocked: (!trial && !paid) || usage >= limit });
+  json(res, 200, { plan, planName: plans[plan]?.name || plan, trialActive: trial, trialEndsAt: merchant.trialEndsAt || null, subscriptionStatus: merchant.subscriptionStatus || null, paidAt: merchant.paidAt || null, currentPeriodEnd: merchant.currentPeriodEnd || null, autopay: merchant.autopay !== false, cancelAtPeriodEnd: merchant.cancelAtPeriodEnd === true, email: merchant.email || null, amount: plans[plan]?.price || null, currency: 'USD', stripeCustomerId: merchant.stripeCustomerId || null, stripeSubscriptionId: merchant.stripeSubscriptionId || null, stripeInvoiceId: merchant.stripeInvoiceId || null, model: trial || (paid && plan === 'premium') ? plans.premium.model : (plans[plan]?.model || 'gpt-4o-mini'), usage, limit, chatLocked: (!trial && !paid) || usage >= limit });
 });
 app.post('/api/chat/message', requireDb, requireMerchantSession, async (req, res) => {
   try {
