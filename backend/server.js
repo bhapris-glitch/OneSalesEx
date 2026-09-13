@@ -20,6 +20,7 @@ const stripe = isRealConfigValue(process.env.STRIPE_SECRET_KEY, 'sk_') ? new Str
 const chatLimits = { starter: 600, growth: 1400, premium: 2300, enterprise: Number.MAX_SAFE_INTEGER };
 const trialPlan = 'premium';
 const defaultTrialSettings = { days: 5, chatLimit: 100 };
+const shopifyApiVersion = process.env.SHOPIFY_API_VERSION || '2025-01';
 const adminKey = String(process.env.ADMIN_API_KEY || '');
 const getTrialSettings = async () => { if (!db) return defaultTrialSettings; const saved = await db.collection('platform_settings').findOne({ _id: 'trial' }); return { days: Number(saved?.days) || defaultTrialSettings.days, chatLimit: Number(saved?.chatLimit) || defaultTrialSettings.chatLimit }; };
 const requireAdmin = (req, res, next) => {
@@ -145,6 +146,19 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
   } catch (error) { res.status(400).send(`Webhook Error: ${error.message}`); }
 });
 
+app.post('/api/shopify/webhooks/app-uninstalled', express.raw({ type: 'application/json' }), async (req, res) => {
+  if (!db || !process.env.SHOPIFY_API_SECRET) return res.sendStatus(503);
+  const digest = crypto.createHmac('sha256', process.env.SHOPIFY_API_SECRET).update(req.body).digest('base64');
+  const supplied = String(req.headers['x-shopify-hmac-sha256'] || '');
+  if (!supplied || digest.length !== supplied.length || !crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(supplied))) return res.sendStatus(401);
+  const shop = normalizeShop(req.headers['x-shopify-shop-domain']);
+  if (shop) {
+    const now = new Date();
+    await db.collection('merchants').updateOne({ shop }, { $set: { shopifyConnected: false, uninstalledAt: now, updatedAt: now }, $unset: { shopifyAccessToken: '', shopifyScopes: '' } });
+  }
+  res.sendStatus(200);
+});
+
 app.use(express.json({ limit: '100kb' }));
 app.use((req, res, next) => { res.set('Access-Control-Allow-Origin', process.env.FRONTEND_URL || '*'); res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Merchant-Session, X-Admin-Key'); res.set('Access-Control-Allow-Methods', 'GET,POST,PUT,OPTIONS'); req.method === 'OPTIONS' ? res.sendStatus(204) : next(); });
 
@@ -181,6 +195,24 @@ app.post('/api/merchant/login', requireDb, async (req, res) => {
   json(res, 200, { success: true, merchantId: merchant._id.toString(), session });
 });
 
+app.post('/api/merchant/uninstall', requireDb, requireMerchantSession, async (req, res) => {
+  const merchant = await db.collection('merchants').findOne({ _id: req.merchantId });
+  if (!merchant) return json(res, 404, { error: 'Merchant account not found.' });
+  const now = new Date();
+  // Shopify does not allow an app to uninstall itself. This disconnects Layboka,
+  // removes stored credentials, and records the request; the merchant can then
+  // confirm removal from Shopify Admin > Settings > Apps and sales channels.
+  await db.collection('merchants').updateOne({ _id: merchant._id }, { $set: { shopifyConnected: false, uninstalledAt: now, uninstallRequestedAt: now, updatedAt: now }, $unset: { shopifyAccessToken: '', shopifyScopes: '' } });
+  await db.collection('activity_events').insertOne({ merchantId: merchant._id, type: 'uninstall_requested', createdAt: now });
+  if (merchant.stripeSubscriptionId && stripe) {
+    try {
+      await stripe.subscriptions.update(merchant.stripeSubscriptionId, { cancel_at_period_end: true });
+      await db.collection('merchants').updateOne({ _id: merchant._id }, { $set: { autopay: false, cancelAtPeriodEnd: true, uninstallSubscriptionCanceledAt: now, updatedAt: now } });
+    } catch (error) { console.error('Unable to schedule subscription cancellation during uninstall:', error.message); }
+  }
+  json(res, 200, { success: true, shop: merchant.shop, message: 'Layboka has been disconnected. Confirm app removal in Shopify Admin > Settings > Apps and sales channels.' });
+});
+
 app.get('/api/merchant/settings', requireDb, requireMerchantSession, async (req, res) => {
   const id = String(req.query.merchantId || '');
   if (!ObjectId.isValid(id)) return json(res, 400, { error: 'A valid merchantId is required.' });
@@ -199,6 +231,9 @@ app.get('/api/merchant/settings', requireDb, requireMerchantSession, async (req,
     paid: paid,
     paidAt: merchant.paidAt || null,
     stripeCustomerId: merchant.stripeCustomerId || null,
+    shop: merchant.shop || null,
+    shopifyConnected: merchant.shopifyConnected === true,
+    uninstalledAt: merchant.uninstalledAt || null,
     usage: merchant.chatUsage || 0,
     limit: trial ? (merchant.trialChatLimit || defaultTrialSettings.chatLimit) : chatLimits[effectivePlan],
     model: trial || (paid && effectivePlan === 'premium') ? plans.premium.model : (plans[effectivePlan]?.model || 'gpt-4o-mini')
@@ -237,7 +272,10 @@ app.get('/api/shopify/callback', requireDb, async (req, res) => {
   const trial = await getTrialSettings();
   const merchant = await db.collection('merchants').findOne({ _id: record.merchantId });
   const trialFields = merchant?.trialStatus === 'pending' ? { trialStatus: 'active', trialPlan, trialChatLimit: trial.chatLimit, trialStartedAt: new Date(), trialEndsAt: new Date(Date.now() + trial.days * 86400000) } : {};
-  await db.collection('merchants').updateOne({ _id: record.merchantId }, { $set: { shopifyAccessToken: token.access_token, shopifyScopes: token.scope, shopifyConnected: true, installedAt: new Date(), updatedAt: new Date(), ...trialFields } });
+  await db.collection('merchants').updateOne({ _id: record.merchantId }, { $set: { shopifyAccessToken: token.access_token, shopifyScopes: token.scope, shopifyConnected: true, installedAt: new Date(), updatedAt: new Date(), ...trialFields }, $unset: { uninstalledAt: '', uninstallRequestedAt: '' } });
+  try {
+    await fetch(`https://${shop}/admin/api/${shopifyApiVersion}/webhooks.json`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token.access_token }, body: JSON.stringify({ webhook: { topic: 'app/uninstalled', address: `${process.env.SHOPIFY_REDIRECT_URI.replace(/\/api\/shopify\/callback$/, '')}/api/shopify/webhooks/app-uninstalled`, format: 'json' } }) });
+  } catch (error) { console.error('Shopify uninstall webhook registration failed:', error.message); }
   await db.collection('oauth_states').deleteOne({ _id: record._id });
   res.redirect(`${process.env.FRONTEND_URL || '/'}/dashboard.html?shopify=connected&merchantId=${record.merchantId}`);
 });
@@ -334,15 +372,16 @@ app.put('/api/admin/trial-settings', requireDb, requireAdmin, async (req, res) =
   json(res, 200, { success: true, days, chatLimit });
 });
 app.get('/api/admin/metrics', requireDb, requireAdmin, async (req, res) => {
-  const [merchants, activeTrials, conversations, paidMerchants, recentActivity] = await Promise.all([
+  const [merchants, activeTrials, conversations, paidMerchants, uninstalledMerchants, recentActivity] = await Promise.all([
     db.collection('merchants').countDocuments(),
     db.collection('merchants').countDocuments({ trialStatus: 'active', trialEndsAt: { $gt: new Date() } }),
     db.collection('conversations').countDocuments(),
     db.collection('merchants').countDocuments({ subscriptionStatus: { $in: ['active', 'trialing'] } }),
-    db.collection('merchants').find({}, { projection: { shop: 1, plan: 1, updatedAt: 1, subscriptionStatus: 1 } }).sort({ updatedAt: -1 }).limit(8).toArray()
+    db.collection('merchants').countDocuments({ shopifyConnected: false, uninstalledAt: { $exists: true } }),
+    db.collection('merchants').find({}, { projection: { shop: 1, email: 1, plan: 1, trialStatus: 1, trialStartedAt: 1, trialEndsAt: 1, trialChatLimit: 1, chatUsage: 1, subscriptionStatus: 1, paidAt: 1, currentPeriodEnd: 1, shopifyConnected: 1, uninstalledAt: 1, updatedAt: 1 } }).sort({ updatedAt: -1 }).limit(50).toArray()
   ]);
   const revenue = await db.collection('merchants').aggregate([{ $match: { subscriptionStatus: { $in: ['active', 'trialing'] } } }, { $group: { _id: null, total: { $sum: { $ifNull: ['$monthlyRevenue', 0] } } } }]).toArray();
-  json(res, 200, { metrics: { merchants, activeTrials, conversations, paidMerchants, monthlyRevenue: revenue[0]?.total || 0 }, charts: { conversations: [], conversions: [], subscriptions: [] }, recentActivity });
+  json(res, 200, { metrics: { merchants, activeTrials, conversations, paidMerchants, uninstalledMerchants, monthlyRevenue: revenue[0]?.total || 0 }, charts: { conversations: [], conversions: [], subscriptions: [] }, recentActivity });
 });
 app.get('/api/dashboard', requireDb, requireMerchantSession, async (req, res) => {
   const merchantId = req.merchantId;
