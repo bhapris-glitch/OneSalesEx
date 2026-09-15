@@ -1,4 +1,4 @@
-const api=window.LAYBOKA_API||'';
+const api=window.ZAVOKA_API||'';
 const id=localStorage.getItem('lbMerchantId')||'';
 const session=localStorage.getItem('lbMerchantSession')||'';
 const preview=new URLSearchParams(location.search).get('preview')==='1';
