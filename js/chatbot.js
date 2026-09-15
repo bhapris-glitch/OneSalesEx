@@ -1,5 +1,5 @@
 (()=>{
-  const API=window.LAYBOKA_API||'';
+  const API=window.ZAVOKA_API||'';
   const merchantId=localStorage.lbMerchantId||'';
   const merchantSession=localStorage.lbMerchantSession||'';
   const root=document.createElement('div');
