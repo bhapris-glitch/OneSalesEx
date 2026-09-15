@@ -1,4 +1,4 @@
-const API_BASE=(window.LAYBOKA_API||'').replace(/\/$/,'');
+const API_BASE=(window.ZAVOKA_API||'').replace(/\/$/,'');
 
 const demoReplies={
   'Find a gift under $100':'Great choice! I found three thoughtful gifts under $100 that shoppers love.',
