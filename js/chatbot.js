@@ -3,7 +3,7 @@
   const merchantId=localStorage.lbMerchantId||'';
   const merchantSession=localStorage.lbMerchantSession||'';
   const root=document.createElement('div');
-  root.innerHTML=`<button class="lb-launcher" aria-label="Open Layboka assistant"><span>✦</span></button><section class="lb-chat" aria-label="Layboka AI chat"><header><span class="lb-avatar" id="lbAvatar">♙</span><div class="lb-heading"><strong id="lbTitle">AI Sales Executive</strong><small><span class="lb-online-dot"></span> Online now</small></div><div class="lb-header-actions"><button class="lb-minimize" aria-label="Minimize chat">−</button><button class="lb-close" aria-label="Close chat">×</button></div></header><div class="lb-messages"><p class="lb-assistant" id="lbWelcome">Hi! 👋 I’m your AI Sales Executive. How can I help you find the perfect product today?</p></div><form><input placeholder="Ask about our products…" autocomplete="off" aria-label="Message Layboka AI"><button aria-label="Send message">➤</button></form></section>`;
+  root.innerHTML=`<button class="lb-launcher" aria-label="Open zavoka assistant"><span>✦</span></button><section class="lb-chat" aria-label="zavoka AI chat"><header><span class="lb-avatar" id="lbAvatar">♙</span><div class="lb-heading"><strong id="lbTitle">AI Sales Executive</strong><small><span class="lb-online-dot"></span> Online now</small></div><div class="lb-header-actions"><button class="lb-minimize" aria-label="Minimize chat">−</button><button class="lb-close" aria-label="Close chat">×</button></div></header><div class="lb-messages"><p class="lb-assistant" id="lbWelcome">Hi! 👋 I’m your AI Sales Executive. How can I help you find the perfect product today?</p></div><form><input placeholder="Ask about our products…" autocomplete="off" aria-label="Message zavoka AI"><button aria-label="Send message">➤</button></form></section>`;
   document.body.append(root);
 
   const chat=root.querySelector('.lb-chat');
@@ -20,13 +20,13 @@
 
   const websiteAnswers=[
     { test:/trial|free|credit card/i, answer:'You can start a 5-day Premium trial with full features and 100 AI chats. There is no charge during the trial and no credit card is required. Start from the Install section on the homepage.' },
-    { test:/price|pricing|cost|starter|growth|premium|plan/i, answer:'Layboka plans are Starter at $25/month with 600 AI conversations, Growth at $59/month with 1,400 conversations, and Premium at $149/month with 2,300 conversations. You can cancel anytime.' },
+    { test:/price|pricing|cost|starter|growth|premium|plan/i, answer:'zavoka plans are Starter at $25/month with 600 AI conversations, Growth at $59/month with 1,400 conversations, and Premium at $149/month with 2,300 conversations. You can cancel anytime.' },
     { test:/install|shopify|connect|setup/i, answer:'Installation starts in the Install section: enter your Shopify store URL and working email, click Install, then approve the Shopify installation. No developer is required.' },
-    { test:/feature|what.*do|recommend|cart|upsell/i, answer:'Layboka chats with shoppers, recommends products, supports upsells and cross-sells, helps recover abandoned carts, matches your brand voice, and provides live sales insights around the clock.' },
+    { test:/feature|what.*do|recommend|cart|upsell/i, answer:'zavoka chats with shoppers, recommends products, supports upsells and cross-sells, helps recover abandoned carts, matches your brand voice, and provides live sales insights around the clock.' },
     { test:/enterprise|high.?volume|custom/i, answer:'Enterprise includes custom AI configuration, a dedicated support team, and integrations with CRM, ERP, inventory, and other business systems. Request a consultation on the Enterprise page.' },
     { test:/support|contact|email|help/i, answer:'For support, installation, pricing, or enterprise questions, contact support@layboka.ai from the Contact page.' },
     { test:/cancel|change.*plan|upgrade/i, answer:'You can change or upgrade your plan whenever your store is ready, and plans can be canceled anytime.' },
-    { test:/about|who are|layboka/i, answer:'Layboka AI is an always-on AI Sales Executive for Shopify merchants, helping shoppers discover products, make confident decisions, and complete purchases.' }
+    { test:/about|who are|layboka/i, answer:'zavoka AI is an always-on AI Sales Executive for Shopify merchants, helping shoppers discover products, make confident decisions, and complete purchases.' }
   ];
 
   const getWebsiteAnswer=(text)=>websiteAnswers.find(({test})=>test.test(text))?.answer;
