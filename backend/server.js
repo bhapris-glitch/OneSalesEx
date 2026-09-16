@@ -69,7 +69,7 @@ const sendEmail = async ({ to, subject, html }) => {
     const response = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: process.env.FROM_EMAIL || 'zavoka AI <notifications@layboka.ai>', to: [to], subject, html })
+      body: JSON.stringify({ from: process.env.FROM_EMAIL || 'zavoka AI <notifications@zavoka.com>', to: [to], subject, html })
     });
     return response.ok;
   } catch (error) { console.error('Email notification failed:', error.message); return false; }
@@ -162,7 +162,7 @@ app.post('/api/shopify/webhooks/app-uninstalled', express.raw({ type: 'applicati
 app.use(express.json({ limit: '100kb' }));
 app.use((req, res, next) => { res.set('Access-Control-Allow-Origin', process.env.FRONTEND_URL || '*'); res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Merchant-Session, X-Admin-Key'); res.set('Access-Control-Allow-Methods', 'GET,POST,PUT,OPTIONS'); req.method === 'OPTIONS' ? res.sendStatus(204) : next(); });
 
-app.get('/api/health', (req, res) => json(res, 200, { ok: Boolean(db), service: 'layboka-api' }));
+app.get('/api/health', (req, res) => json(res, 200, { ok: Boolean(db), service: 'zavoka-api' }));
 app.get('/api/plans', (req, res) => json(res, 200, { plans }));
 app.post('/api/install', requireDb, async (req, res) => {
   const shop = normalizeShop(req.body.shop);
@@ -175,7 +175,7 @@ app.post('/api/install', requireDb, async (req, res) => {
   const state = crypto.randomBytes(24).toString('hex'); await db.collection('oauth_states').insertOne({ state, shop, merchantId: result._id, createdAt: now, expiresAt: new Date(now.getTime() + 10 * 60000) });
   const session = crypto.randomBytes(32).toString('hex');
   await db.collection('merchant_sessions').insertOne({ session, merchantId: result._id, createdAt: now, expiresAt: new Date(now.getTime() + 7 * 86400000) });
-  const installUrl = `https://${shop}/admin/oauth/authorize?client_id=${encodeURIComponent(process.env.SHOPIFY_API_KEY)}&scope=${encodeURIComponent(process.env.SHOPIFY_SCOPES || 'read_products,write_script_tags')}&redirect_uri=${encodeURIComponent(process.env.SHOPIFY_REDIRECT_URI)}&state=${state}`;
+  const installUrl = `https://${shop}/admin/oauth/authorize?client_id=${encodeURIComponent(process.env.SHOPIFY_API_KEY)}&scope=${encodeURIComponent(process.env.SHOPIFY_SCOPES || 'read_products,write_script_tags')}&redirect_uri=${encodeURIComponent(process.env.SHOPIFY_REDIRECT_URI || 'https://zavoka.com/api/shopify/callback')}&state=${state}`;
   const merchant = result.value || result;
   if (!merchant.trialStartEmailSent) {
     await db.collection('merchants').updateOne({ _id: merchant._id }, { $set: { trialStartEmailSent: true } });
