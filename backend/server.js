@@ -167,6 +167,20 @@ app.use((req, res, next) => { res.set('Access-Control-Allow-Origin', process.env
 app.get('/api/health', (req, res) => json(res, 200, { ok: Boolean(db), service: 'zavoka-api' }));
 app.get('/api/plans', (req, res) => json(res, 200, { plans }));
 app.get('/api/website-faq', (req, res) => json(res, 200, { faq: websiteFaq }));
+app.post('/api/website-chat', async (req, res) => {
+  const message = String(req.body.message || '').trim().slice(0, 2000);
+  if (!message) return json(res, 400, { error: 'Enter a question.' });
+  const knowledge = websiteFaq.map((item) => `Question: ${item.question}\nAnswer: ${item.answer}`).join('\n\n');
+  const fallback = 'I could not find a reliable answer in the zavoka website information. Please try asking about our features, pricing, trial, installation, Shopify, Enterprise, support, privacy, or terms.';
+  let reply = fallback;
+  if (process.env.OPENAI_API_KEY) {
+    try {
+      const response = await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` }, body: JSON.stringify({ model: process.env.OPENAI_WEBSITE_MODEL || 'gpt-4o-mini', temperature: 0.2, max_tokens: 450, messages: [{ role: 'system', content: `You are the zavoka website assistant. Answer only questions about zavoka's public website using this official information:\n${knowledge}\nIf the answer is not covered, say that you could not find it in the official website information. Do not discuss or invent any merchant's products, inventory, prices, shipping, refunds, discounts, or private store data.` }, { role: 'user', content: message }] }) });
+      if (response.ok) { const data = await response.json(); reply = data.choices?.[0]?.message?.content?.trim() || fallback; }
+    } catch (error) { console.error('Website chat failed:', error.message); }
+  }
+  json(res, 200, { success: true, reply });
+});
 app.post('/api/install', requireDb, async (req, res) => {
   const shop = normalizeShop(req.body.shop);
   const email = String(req.body.email || '').trim().toLowerCase();
@@ -345,22 +359,9 @@ app.post('/api/chat/message', requireDb, requireMerchantSession, async (req, res
     if (merchant && merchant.chatUsageMonth !== month) await db.collection('merchants').updateOne({ _id: merchant._id }, { $set: { chatUsage: 0, chatUsageMonth: month } });
     const currentUsage = merchant?.chatUsageMonth === month ? (merchant.chatUsage || 0) : 0;
     if (currentUsage >= limit) return json(res, 402, { locked: true, limitReached: true, error: trial ? 'Your trial usage limit has been reached. Upgrade to continue.' : `This plan has reached its ${limit.toLocaleString()} monthly AI conversation limit.` });
-        const fallbackReplies = [
-      'I’m going to take a tiny AI nap 😴 I’m not sure about that one yet. Try asking me about zavoka, pricing, plans, installation, or Shopify.',
-      'My AI brain is feeling a little hungry 😋🥝 I couldn’t find that answer, but I can help with our website, features, trial, or support.',
-      'Oops — that question slipped past my digital bookshelf 📚✨ Ask me something about zavoka AI and I’ll do my best to help.',
-      'I’m scratching my virtual head 🤔 I don’t have a reliable answer for that yet. Could you ask it another way?',
-      'My answer machine needs a quick recharge 🔋 I couldn’t help with that question, but I’m ready for questions about plans, pricing, or installation.',
-      'That one made my AI circuits do a little dance 💃🤖 I don’t know the answer yet. Please try a simpler question.',
-      'I searched my little AI notebook and came up empty 📝😅 Ask me about zavoka features, the free trial, Shopify, or enterprise plans.',
-      'I’m taking a short snack break 🍎🤖 and couldn’t work that one out. Please try again with a question about our website.',
-      'Hmm, my crystal ball is cloudy today 🔮 I don’t want to guess. Ask me another question and I’ll give you the most accurate answer I can.',
-      'I’m still learning that topic 🌱 If you ask about zavoka AI, pricing, support, billing, or setup, I should be able to help.'
-    ];
-    let reply = fallbackReplies[Math.floor(Math.random() * fallbackReplies.length)];
-    const websiteKnowledge = websiteFaq.map((item) => `Question: ${item.question}\nAnswer: ${item.answer}`).join('\n\n');
+    let reply = 'I could not find that information for this store. Please ask me about our products, availability, shipping, returns, or store policies.';
     if (process.env.OPENAI_API_KEY) {
-      const response = await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` }, body: JSON.stringify({ model: trial || plan === 'premium' ? plans.premium.model : (plans[plan]?.model || 'gpt-4o-mini'), temperature: 0.25, max_tokens: 450, messages: [{ role: 'system', content: `You are ${settings.agentName}, the helpful zavoka AI website assistant for ${settings.storeName}. ${settings.behavior} Answer accurately using the following official website information:\n${websiteKnowledge}\nAnswer the visitor directly and concisely. If the question is about a merchant's actual products, explain that product catalog access must be connected and do not invent details.` }, { role: 'user', content: String(req.body.message || '').slice(0, 2000) }] }) });
+      const response = await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` }, body: JSON.stringify({ model: trial || plan === 'premium' ? plans.premium.model : (plans[plan]?.model || 'gpt-4o-mini'), temperature: 0.25, max_tokens: 450, messages: [{ role: 'system', content: `You are ${settings.agentName}, the AI Sales Executive for the Shopify store ${settings.storeName}. ${settings.behavior} Answer only with information supplied by this merchant's connected store catalog and policies. Do not mention zavoka website pricing, zavoka trials, zavoka Enterprise, zavoka support, website FAQ, or public company information. Never invent product, inventory, price, shipping, refund, discount, or policy details. If the store data does not answer the question, say: "I could not find that information for this store. Please contact the store team."` }, { role: 'user', content: String(req.body.message || '').slice(0, 2000) }] }) });
       if (response.ok) { const data = await response.json(); reply = data.choices?.[0]?.message?.content?.trim() || reply; }
     }
     if (merchant) {
@@ -408,5 +409,5 @@ app.get('/api/dashboard', requireDb, requireMerchantSession, async (req, res) =>
 });
 app.use((req, res) => json(res, 404, { error: 'Route not found' }));
 
-async function start() { await mongo.connect(); db = mongo.db(process.env.MONGODB_DB || 'layboka'); await Promise.all([db.collection('merchants').createIndex({ shop: 1 }, { unique: true, sparse: true }), db.collection('oauth_states').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 })]); setInterval(() => processTrialNotifications().catch((error) => console.error('Trial notification job failed:', error.message)), 15 * 60 * 1000); await processTrialNotifications(); app.listen(port, () => console.log(`zavoka API listening on ${port}`)); }
+async function start() { await mongo.connect(); db = mongo.db(process.env.MONGODB_DB || 'zavoka'); await Promise.all([db.collection('merchants').createIndex({ shop: 1 }, { unique: true, sparse: true }), db.collection('oauth_states').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 })]); setInterval(() => processTrialNotifications().catch((error) => console.error('Trial notification job failed:', error.message)), 15 * 60 * 1000); await processTrialNotifications(); app.listen(port, () => console.log(`zavoka API listening on ${port}`)); }
 start().catch((error) => { console.error('Startup failed:', error); process.exit(1); });
