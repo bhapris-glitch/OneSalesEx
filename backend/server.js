@@ -3,7 +3,9 @@ import crypto from 'node:crypto';
 import express from 'express';
 import { MongoClient, ObjectId } from 'mongodb';
 import Stripe from 'stripe';
+import { readFileSync } from 'node:fs';
 
+const websiteFaq = JSON.parse(readFileSync(new URL('./website-faq.json', import.meta.url), 'utf8'));
 const required = ['MONGODB_URI', 'MONGODB_DB', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'STRIPE_STARTER_PRICE_ID', 'STRIPE_GROWTH_PRICE_ID', 'STRIPE_PREMIUM_PRICE_ID', 'SHOPIFY_API_KEY', 'SHOPIFY_API_SECRET', 'SHOPIFY_REDIRECT_URI'];
 const missing = required.filter((key) => !process.env[key]);
 if (missing.length) console.warn(`Missing production environment variables: ${missing.join(', ')}`);
@@ -164,6 +166,7 @@ app.use((req, res, next) => { res.set('Access-Control-Allow-Origin', process.env
 
 app.get('/api/health', (req, res) => json(res, 200, { ok: Boolean(db), service: 'zavoka-api' }));
 app.get('/api/plans', (req, res) => json(res, 200, { plans }));
+app.get('/api/website-faq', (req, res) => json(res, 200, { faq: websiteFaq }));
 app.post('/api/install', requireDb, async (req, res) => {
   const shop = normalizeShop(req.body.shop);
   const email = String(req.body.email || '').trim().toLowerCase();
@@ -342,8 +345,20 @@ app.post('/api/chat/message', requireDb, requireMerchantSession, async (req, res
     if (merchant && merchant.chatUsageMonth !== month) await db.collection('merchants').updateOne({ _id: merchant._id }, { $set: { chatUsage: 0, chatUsageMonth: month } });
     const currentUsage = merchant?.chatUsageMonth === month ? (merchant.chatUsage || 0) : 0;
     if (currentUsage >= limit) return json(res, 402, { locked: true, limitReached: true, error: trial ? 'Your trial usage limit has been reached. Upgrade to continue.' : `This plan has reached its ${limit.toLocaleString()} monthly AI conversation limit.` });
-    let reply = 'I can help you discover products, compare options, understand pricing, start a 5-day trial, or learn how zavoka AI works. What would you like to know?';
-    const websiteKnowledge = `zavoka AI is an always-on AI Sales Executive for Shopify merchants. It chats with shoppers, recommends products, supports upsells and cross-sells, recovers abandoned carts, matches the merchant’s brand voice, provides live sales insights, and is available around the clock. Merchants can start a Premium trial with full features; there is no charge during the trial and no credit card is required. Installation starts from the Install section: enter a Shopify store URL and working email, then approve Shopify installation. Public monthly plans are Starter at $25/month with 600 AI conversations, Growth at $59/month with 1,400 conversations, and Premium at $149/month with 2,300 conversations. Plans can be canceled anytime. The website has Features, Pricing, Enterprise, About Us, Contact Us, Terms, Privacy, Merchant Login, and Install pages. zavoka should never claim a specific product, inventory item, discount, shipping time, refund policy, or store policy unless that information has been supplied by the connected merchant. For account, billing, Shopify installation, or support questions, direct the visitor to the relevant website page or Contact Us.`;
+        const fallbackReplies = [
+      'I’m going to take a tiny AI nap 😴 I’m not sure about that one yet. Try asking me about zavoka, pricing, plans, installation, or Shopify.',
+      'My AI brain is feeling a little hungry 😋🥝 I couldn’t find that answer, but I can help with our website, features, trial, or support.',
+      'Oops — that question slipped past my digital bookshelf 📚✨ Ask me something about zavoka AI and I’ll do my best to help.',
+      'I’m scratching my virtual head 🤔 I don’t have a reliable answer for that yet. Could you ask it another way?',
+      'My answer machine needs a quick recharge 🔋 I couldn’t help with that question, but I’m ready for questions about plans, pricing, or installation.',
+      'That one made my AI circuits do a little dance 💃🤖 I don’t know the answer yet. Please try a simpler question.',
+      'I searched my little AI notebook and came up empty 📝😅 Ask me about zavoka features, the free trial, Shopify, or enterprise plans.',
+      'I’m taking a short snack break 🍎🤖 and couldn’t work that one out. Please try again with a question about our website.',
+      'Hmm, my crystal ball is cloudy today 🔮 I don’t want to guess. Ask me another question and I’ll give you the most accurate answer I can.',
+      'I’m still learning that topic 🌱 If you ask about zavoka AI, pricing, support, billing, or setup, I should be able to help.'
+    ];
+    let reply = fallbackReplies[Math.floor(Math.random() * fallbackReplies.length)];
+    const websiteKnowledge = websiteFaq.map((item) => `Question: ${item.question}\nAnswer: ${item.answer}`).join('\n\n');
     if (process.env.OPENAI_API_KEY) {
       const response = await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` }, body: JSON.stringify({ model: trial || plan === 'premium' ? plans.premium.model : (plans[plan]?.model || 'gpt-4o-mini'), temperature: 0.25, max_tokens: 450, messages: [{ role: 'system', content: `You are ${settings.agentName}, the helpful zavoka AI website assistant for ${settings.storeName}. ${settings.behavior} Answer accurately using the following official website information:\n${websiteKnowledge}\nAnswer the visitor directly and concisely. If the question is about a merchant's actual products, explain that product catalog access must be connected and do not invent details.` }, { role: 'user', content: String(req.body.message || '').slice(0, 2000) }] }) });
       if (response.ok) { const data = await response.json(); reply = data.choices?.[0]?.message?.content?.trim() || reply; }
