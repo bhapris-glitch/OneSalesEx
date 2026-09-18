@@ -3,9 +3,23 @@ import crypto from 'node:crypto';
 import express from 'express';
 import { MongoClient, ObjectId } from 'mongodb';
 import Stripe from 'stripe';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 
-const websiteFaq = JSON.parse(readFileSync(new URL('./website-faq.json', import.meta.url), 'utf8'));
+const faqPaths = [
+  new URL('./website-faq.json', import.meta.url),
+  new URL('./backend/website-faq.json', import.meta.url)
+];
+const faqPath = faqPaths.find((candidate) => existsSync(candidate));
+let websiteFaq = [];
+if (faqPath) {
+  try {
+    websiteFaq = JSON.parse(readFileSync(faqPath, 'utf8'));
+  } catch (error) {
+    console.error('Website FAQ could not be loaded:', error.message);
+  }
+} else {
+  console.error('Website FAQ file is missing from the backend deployment.');
+}
 const required = ['MONGODB_URI', 'MONGODB_DB', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'STRIPE_STARTER_PRICE_ID', 'STRIPE_GROWTH_PRICE_ID', 'STRIPE_PREMIUM_PRICE_ID', 'SHOPIFY_API_KEY', 'SHOPIFY_API_SECRET', 'SHOPIFY_REDIRECT_URI'];
 const missing = required.filter((key) => !process.env[key]);
 if (missing.length) console.warn(`Missing production environment variables: ${missing.join(', ')}`);
