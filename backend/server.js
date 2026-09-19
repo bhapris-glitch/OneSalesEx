@@ -67,6 +67,13 @@ const normalizeShop = (value) => {
     return null;
   }
 };
+const shopifyRedirectUri = () => String(process.env.SHOPIFY_REDIRECT_URI || '').trim();
+const createShopifyInstallUrl = ({ shop, state }) => {
+  const apiKey = String(process.env.SHOPIFY_API_KEY || '').trim();
+  const redirectUri = shopifyRedirectUri();
+  if (!apiKey || apiKey.includes('replace_me') || !redirectUri || !/^https:\/\//i.test(redirectUri)) return null;
+  return `https://${shop}/admin/oauth/authorize?client_id=${encodeURIComponent(apiKey)}&scope=${encodeURIComponent(process.env.SHOPIFY_SCOPES || 'read_products')}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(state)}`;
+};
 const requireDb = (req, res, next) => db ? next() : json(res, 503, { error: 'Database is not connected.' });
 const requireMerchantSession = async (req, res, next) => {
   const merchantId = String(req.query.merchantId || req.body?.merchantId || '');
@@ -206,11 +213,12 @@ app.post('/api/install', requireDb, async (req, res) => {
   const state = crypto.randomBytes(24).toString('hex'); await db.collection('oauth_states').insertOne({ state, shop, merchantId: result._id, createdAt: now, expiresAt: new Date(now.getTime() + 10 * 60000) });
   const session = crypto.randomBytes(32).toString('hex');
   await db.collection('merchant_sessions').insertOne({ session, merchantId: result._id, createdAt: now, expiresAt: new Date(now.getTime() + 7 * 86400000) });
-  const installUrl = `https://${shop}/admin/oauth/authorize?client_id=${encodeURIComponent(process.env.SHOPIFY_API_KEY)}&scope=${encodeURIComponent(process.env.SHOPIFY_SCOPES || 'read_products,write_script_tags')}&redirect_uri=${encodeURIComponent(process.env.SHOPIFY_REDIRECT_URI || 'https://zavoka.com/api/shopify/callback')}&state=${state}`;
+  const installUrl = createShopifyInstallUrl({ shop, state });
+  if (!installUrl) return json(res, 503, { error: 'Shopify OAuth is not configured correctly. Check SHOPIFY_API_KEY and SHOPIFY_REDIRECT_URI.' });
   const merchant = result.value || result;
   if (!merchant.trialStartEmailSent) {
     await db.collection('merchants').updateOne({ _id: merchant._id }, { $set: { trialStartEmailSent: true } });
-    await trialEmail(merchant, 'Your Premium trial has started', 'Your 5-day Premium trial is active with full Premium features and 100 AI chats. No charge will be made during the trial.');
+    await trialEmail(merchant, 'Your Shopify installation has started', 'Your zavoka account has been created. Approve the app in Shopify to connect your store; the Premium trial begins after Shopify authorization is completed.');
   }
   json(res, 201, { success: true, merchantId: merchant._id.toString(), session, trialPlan, message: 'Your Premium trial is ready. Continue to Shopify to approve the app.', installUrl });
 });
@@ -288,17 +296,28 @@ app.get('/api/shopify/connect', requireDb, requireMerchantSession, async (req, r
   const now = new Date();
   const state = crypto.randomBytes(24).toString('hex');
   await db.collection('oauth_states').insertOne({ state, shop: merchant.shop, merchantId: merchant._id, createdAt: now, expiresAt: new Date(now.getTime() + 10 * 60000) });
-  const installUrl = `https://${merchant.shop}/admin/oauth/authorize?client_id=${encodeURIComponent(process.env.SHOPIFY_API_KEY)}&scope=${encodeURIComponent(process.env.SHOPIFY_SCOPES || 'read_products,write_script_tags')}&redirect_uri=${encodeURIComponent(process.env.SHOPIFY_REDIRECT_URI)}&state=${state}`;
+  const installUrl = createShopifyInstallUrl({ shop: merchant.shop, state });
+  if (!installUrl) return json(res, 503, { error: 'Shopify OAuth is not configured correctly. Check SHOPIFY_API_KEY and SHOPIFY_REDIRECT_URI.' });
   json(res, 200, { installUrl });
 });
 app.get('/api/shopify/callback', requireDb, async (req, res) => {
-  const { shop, code, state, hmac } = req.query; const record = await db.collection('oauth_states').findOne({ state, shop, expiresAt: { $gt: new Date() } });
-  if (!record || !code || !shop || !hmac) return res.status(400).send('Invalid or expired Shopify authorization.');
-  const query = { ...req.query }; delete query.signature; delete query.hmac; const message = Object.keys(query).sort().map((key) => `${key}=${Array.isArray(query[key]) ? query[key].join(',') : query[key]}`).join('&');
+  const shop = normalizeShop(req.query.shop);
+  const code = String(req.query.code || '');
+  const state = String(req.query.state || '');
+  const hmac = String(req.query.hmac || '');
+  const record = await db.collection('oauth_states').findOne({ state, shop, expiresAt: { $gt: new Date() } });
+  const dashboard = `${process.env.FRONTEND_URL || '/'}dashboard.html`;
+  if (!record || !code || !shop || !hmac) return res.redirect(`${dashboard}?shopify=error&message=${encodeURIComponent('The Shopify authorization expired or was not completed. Please start installation again.')}`);
+  const query = { ...req.query, shop }; delete query.signature; delete query.hmac;
+  const message = Object.keys(query).sort().map((key) => `${key}=${Array.isArray(query[key]) ? query[key].join(',') : query[key]}`).join('&');
   const digest = crypto.createHmac('sha256', process.env.SHOPIFY_API_SECRET).update(message).digest('hex');
-  if (digest.length !== String(hmac).length || !crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(String(hmac)))) return res.status(400).send('Invalid Shopify signature.');
+  if (digest.length !== hmac.length || !crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(hmac))) return res.redirect(`${dashboard}?shopify=error&message=${encodeURIComponent('Shopify authorization could not be verified. Please start installation again.')}`);
   const tokenResponse = await fetch(`https://${shop}/admin/oauth/access_token`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_id: process.env.SHOPIFY_API_KEY, client_secret: process.env.SHOPIFY_API_SECRET, code }) });
-  if (!tokenResponse.ok) return res.status(502).send('Shopify token exchange failed.');
+  if (!tokenResponse.ok) {
+    const details = await tokenResponse.text().catch(() => '');
+    console.error('Shopify token exchange failed:', tokenResponse.status, details);
+    return res.redirect(`${dashboard}?shopify=error&message=${encodeURIComponent('Shopify rejected the app credentials or redirect URL. Please check the Shopify app configuration.')}`);
+  }
   const token = await tokenResponse.json();
   const trial = await getTrialSettings();
   const merchant = await db.collection('merchants').findOne({ _id: record.merchantId });
