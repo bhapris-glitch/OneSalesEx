@@ -1,6 +1,7 @@
 (()=>{
   const API=window.ZAVOKA_API||'';
   const root=document.createElement('div');
+  root.className='lb-public-widget';
   const avatarImage='magnific_close-crop-headtoneck-of-_KjICgr5kqp_1.png';
   root.innerHTML=`<button class="lb-launcher" aria-label="Open zavoka assistant"><img src="${avatarImage}" alt="Sophia, zavoka Sales Executive"></button><section class="lb-chat" aria-label="zavoka website assistant"><header><span class="lb-avatar" id="lbAvatar"><img src="${avatarImage}" alt="Sophia, zavoka Sales Executive"></span><div class="lb-heading"><strong id="lbTitle">Sophia · Sales Executive</strong><small><span class="lb-online-dot"></span> Online now</small></div><div class="lb-header-actions"><button class="lb-minimize" aria-label="Minimize chat">−</button><button class="lb-close" aria-label="Close chat">×</button></div></header><div class="lb-messages"><p class="lb-assistant" id="lbWelcome">Hi! I’m Sophia, your Sales Executive from zavoka. How can I help you about our website?</p></div><form><input placeholder="Ask about zavoka…" autocomplete="off" aria-label="Message zavoka AI"><button aria-label="Send message">➤</button></form></section>`;
   document.body.append(root);
@@ -11,7 +12,9 @@
   const input=root.querySelector('input');
   const sendButton=form.querySelector('button');
   const fallback='I can help with zavoka inquiry like features, pricing, plans, installation, the free trial, Enterprise, or support. What would you like to know?';
-  const addMessage=(text,kind='assistant')=>{const p=document.createElement('p');p.className=`lb-${kind}`;p.textContent=text;messages.append(p);messages.scrollTop=messages.scrollHeight;};
+  const pricingAnswer='Our plans are Starter at $25/month with 600 AI conversations, Growth at $59/month with 1,400 AI conversations, and Premium at $149/month with 2,300 AI conversations. Enterprise pricing is custom. Plans can be canceled anytime.';
+  const getLocalAnswer=text=>/\b(price|pricing|plan|plans|cost|how much|starter|growth|premium)\b/i.test(text)?pricingAnswer:null;
+  const addMessage(text,kind='assistant')=>{const p=document.createElement('p');p.className=`lb-${kind}`;p.textContent=text;messages.append(p);messages.scrollTop=messages.scrollHeight;};
 
   form.onsubmit=async event=>{
     event.preventDefault();
@@ -19,6 +22,11 @@
     if(!text)return;
     addMessage(text,'user');
     input.value='';
+    const localAnswer=getLocalAnswer(text);
+    if(localAnswer){
+      addMessage(localAnswer);
+      return;
+    }
     input.disabled=true;
     sendButton.disabled=true;
     try{
