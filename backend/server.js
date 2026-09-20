@@ -1,25 +1,10 @@
 import 'dotenv/config';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import express from 'express';
 import { MongoClient, ObjectId } from 'mongodb';
 import Stripe from 'stripe';
-import { existsSync, readFileSync } from 'node:fs';
 
-const faqPaths = [
-  new URL('./website-faq.json', import.meta.url),
-  new URL('./backend/website-faq.json', import.meta.url)
-];
-const faqPath = faqPaths.find((candidate) => existsSync(candidate));
-let websiteFaq = [];
-if (faqPath) {
-  try {
-    websiteFaq = JSON.parse(readFileSync(faqPath, 'utf8'));
-  } catch (error) {
-    console.error('Website FAQ could not be loaded:', error.message);
-  }
-} else {
-  console.error('Website FAQ file is missing from the backend deployment.');
-}
 const required = ['MONGODB_URI', 'MONGODB_DB', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'STRIPE_STARTER_PRICE_ID', 'STRIPE_GROWTH_PRICE_ID', 'STRIPE_PREMIUM_PRICE_ID', 'SHOPIFY_API_KEY', 'SHOPIFY_API_SECRET', 'SHOPIFY_REDIRECT_URI'];
 const missing = required.filter((key) => !process.env[key]);
 if (missing.length) console.warn(`Missing production environment variables: ${missing.join(', ')}`);
@@ -46,7 +31,7 @@ const requireAdmin = (req, res, next) => {
 };
 const isTrialActive = (merchant) => merchant?.trialStatus === 'active' && merchant.trialEndsAt && new Date(merchant.trialEndsAt) > new Date();
 const isPaid = (merchant) => ['active', 'trialing'].includes(merchant?.subscriptionStatus) && merchant?.stripeSubscriptionId && (!merchant.currentPeriodEnd || new Date(merchant.currentPeriodEnd) > new Date());
-const defaultSettings = { agentName: 'Emily', agentPic: '', storeName: 'zavoka', themeColor: '#FF4616', primaryColor: '#FF4616', chatBackground: '#0D1009', accentColor: '#39D353', behavior: 'Friendly, helpful, concise, and focused on improving sales.', welcomeMessage: 'Hi! I’m Emily. How can I help you shop today?' };
+const defaultSettings = { agentName: 'Emily', agentPic: '', storeName: 'zavoka', themeColor: '#FF4616', primaryColor: '#FF4616', chatBackground: '#0D1009', accentColor: '#39D353', avatarBorderColor: '#000000', behavior: 'Friendly, helpful, concise, and focused on improving sales.', welcomeMessage: 'Hi! I’m Emily. How can I help you shop today?' };
 const mongo = new MongoClient(process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017');
 let db;
 
@@ -66,13 +51,6 @@ const normalizeShop = (value) => {
   } catch {
     return null;
   }
-};
-const shopifyRedirectUri = () => String(process.env.SHOPIFY_REDIRECT_URI || '').trim();
-const createShopifyInstallUrl = ({ shop, state }) => {
-  const apiKey = String(process.env.SHOPIFY_API_KEY || '').trim();
-  const redirectUri = shopifyRedirectUri();
-  if (!apiKey || apiKey.includes('replace_me') || !redirectUri || !/^https:\/\//i.test(redirectUri)) return null;
-  return `https://${shop}/admin/oauth/authorize?client_id=${encodeURIComponent(apiKey)}&scope=${encodeURIComponent(process.env.SHOPIFY_SCOPES || 'read_products')}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(state)}`;
 };
 const requireDb = (req, res, next) => db ? next() : json(res, 503, { error: 'Database is not connected.' });
 const requireMerchantSession = async (req, res, next) => {
@@ -187,38 +165,24 @@ app.use((req, res, next) => { res.set('Access-Control-Allow-Origin', process.env
 
 app.get('/api/health', (req, res) => json(res, 200, { ok: Boolean(db), service: 'zavoka-api' }));
 app.get('/api/plans', (req, res) => json(res, 200, { plans }));
-app.get('/api/website-faq', (req, res) => json(res, 200, { faq: websiteFaq }));
-app.post('/api/website-chat', async (req, res) => {
-  const message = String(req.body.message || '').trim().slice(0, 2000);
-  if (!message) return json(res, 400, { error: 'Enter a question.' });
-  const knowledge = websiteFaq.map((item) => `Question: ${item.question}\nAnswer: ${item.answer}`).join('\n\n');
-  const fallback = 'I could not find a reliable answer in the zavoka website information. Please try asking about our features, pricing, trial, installation, Shopify, Enterprise, support, privacy, or terms.';
-  let reply = fallback;
-  if (process.env.OPENAI_API_KEY) {
-    try {
-      const response = await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` }, body: JSON.stringify({ model: process.env.OPENAI_WEBSITE_MODEL || 'gpt-4o-mini', temperature: 0.2, max_tokens: 450, messages: [{ role: 'system', content: `You are the zavoka website assistant. Answer only questions about zavoka's public website using this official information:\n${knowledge}\nIf the answer is not covered, say that you could not find it in the official website information. Do not discuss or invent any merchant's products, inventory, prices, shipping, refunds, discounts, or private store data.` }, { role: 'user', content: message }] }) });
-      if (response.ok) { const data = await response.json(); reply = data.choices?.[0]?.message?.content?.trim() || fallback; }
-    } catch (error) { console.error('Website chat failed:', error.message); }
-  }
-  json(res, 200, { success: true, reply });
-});
 app.post('/api/install', requireDb, async (req, res) => {
   const shop = normalizeShop(req.body.shop);
   const email = String(req.body.email || '').trim().toLowerCase();
   if (!shop) return json(res, 400, { error: 'Enter a valid Shopify store domain, such as your-store.myshopify.com or yourstore.com.' });
-  if (!validEmail(email)) return json(res, 400, { error: 'Enter a valid working email address.' });
+  if (email && !validEmail(email)) return json(res, 400, { error: 'Enter a valid working email address.' });
   const now = new Date();
   const trial = await getTrialSettings();
-  const result = await db.collection('merchants').findOneAndUpdate({ shop }, { $set: { shop, email, updatedAt: now }, $setOnInsert: { createdAt: now, trialStatus: 'pending', trialPlan } }, { upsert: true, returnDocument: 'after' });
+  const merchantUpdate = { $set: { shop, updatedAt: now }, $setOnInsert: { createdAt: now, trialStatus: 'pending', trialPlan } };
+  if (email) merchantUpdate.$set.email = email;
+  const result = await db.collection('merchants').findOneAndUpdate({ shop }, merchantUpdate, { upsert: true, returnDocument: 'after' });
   const state = crypto.randomBytes(24).toString('hex'); await db.collection('oauth_states').insertOne({ state, shop, merchantId: result._id, createdAt: now, expiresAt: new Date(now.getTime() + 10 * 60000) });
   const session = crypto.randomBytes(32).toString('hex');
   await db.collection('merchant_sessions').insertOne({ session, merchantId: result._id, createdAt: now, expiresAt: new Date(now.getTime() + 7 * 86400000) });
-  const installUrl = createShopifyInstallUrl({ shop, state });
-  if (!installUrl) return json(res, 503, { error: 'Shopify OAuth is not configured correctly. Check SHOPIFY_API_KEY and SHOPIFY_REDIRECT_URI.' });
+  const installUrl = `https://${shop}/admin/oauth/authorize?client_id=${encodeURIComponent(process.env.SHOPIFY_API_KEY)}&scope=${encodeURIComponent(process.env.SHOPIFY_SCOPES || 'read_products,write_script_tags')}&redirect_uri=${encodeURIComponent(process.env.SHOPIFY_REDIRECT_URI || 'https://zavoka.com/api/shopify/callback')}&state=${state}`;
   const merchant = result.value || result;
   if (!merchant.trialStartEmailSent) {
     await db.collection('merchants').updateOne({ _id: merchant._id }, { $set: { trialStartEmailSent: true } });
-    await trialEmail(merchant, 'Your Shopify installation has started', 'Your zavoka account has been created. Approve the app in Shopify to connect your store; the Premium trial begins after Shopify authorization is completed.');
+    await trialEmail(merchant, 'Your Premium trial has started', 'Your 5-day Premium trial is active with full Premium features and 100 AI chats. No charge will be made during the trial.');
   }
   json(res, 201, { success: true, merchantId: merchant._id.toString(), session, trialPlan, message: 'Your Premium trial is ready. Continue to Shopify to approve the app.', installUrl });
 });
@@ -282,7 +246,7 @@ app.put('/api/merchant/settings', requireDb, requireMerchantSession, async (req,
   const id = String(req.body.merchantId || '');
   if (!ObjectId.isValid(id)) return json(res, 400, { error: 'A valid merchantId is required.' });
   const color = (value, fallback) => /^#[0-9a-f]{6}$/i.test(String(value || '')) ? String(value) : fallback;
-  const settings = { ...defaultSettings, agentName: String(req.body.agentName || defaultSettings.agentName).slice(0, 80), agentPic: String(req.body.agentPic || '').slice(0, 500), storeName: String(req.body.storeName || defaultSettings.storeName).slice(0, 120), primaryColor: color(req.body.primaryColor, defaultSettings.primaryColor), chatBackground: color(req.body.chatBackground, defaultSettings.chatBackground), accentColor: color(req.body.accentColor, defaultSettings.accentColor), themeColor: color(req.body.primaryColor || req.body.themeColor, defaultSettings.themeColor), behavior: String(req.body.behavior || defaultSettings.behavior).slice(0, 1000), welcomeMessage: String(req.body.welcomeMessage || defaultSettings.welcomeMessage).slice(0, 500) };
+  const settings = { ...defaultSettings, agentName: String(req.body.agentName || defaultSettings.agentName).slice(0, 80), agentPic: String(req.body.agentPic || '').slice(0, 500), storeName: String(req.body.storeName || defaultSettings.storeName).slice(0, 120), primaryColor: color(req.body.primaryColor, defaultSettings.primaryColor), chatBackground: color(req.body.chatBackground, defaultSettings.chatBackground), accentColor: color(req.body.accentColor, defaultSettings.accentColor), avatarBorderColor: color(req.body.avatarBorderColor, defaultSettings.avatarBorderColor), themeColor: color(req.body.primaryColor || req.body.themeColor, defaultSettings.themeColor), behavior: String(req.body.behavior || defaultSettings.behavior).slice(0, 1000), welcomeMessage: String(req.body.welcomeMessage || defaultSettings.welcomeMessage).slice(0, 500) };
   const merchant = await db.collection('merchants').findOne({ _id: new ObjectId(id) });
   await db.collection('merchants').updateOne({ _id: new ObjectId(id) }, { $set: { settings, updatedAt: new Date() } });
   await notifyMerchant(merchant, 'Executive settings updated', 'Your zavoka AI Sales Executive settings were updated successfully.');
@@ -296,28 +260,17 @@ app.get('/api/shopify/connect', requireDb, requireMerchantSession, async (req, r
   const now = new Date();
   const state = crypto.randomBytes(24).toString('hex');
   await db.collection('oauth_states').insertOne({ state, shop: merchant.shop, merchantId: merchant._id, createdAt: now, expiresAt: new Date(now.getTime() + 10 * 60000) });
-  const installUrl = createShopifyInstallUrl({ shop: merchant.shop, state });
-  if (!installUrl) return json(res, 503, { error: 'Shopify OAuth is not configured correctly. Check SHOPIFY_API_KEY and SHOPIFY_REDIRECT_URI.' });
+  const installUrl = `https://${merchant.shop}/admin/oauth/authorize?client_id=${encodeURIComponent(process.env.SHOPIFY_API_KEY)}&scope=${encodeURIComponent(process.env.SHOPIFY_SCOPES || 'read_products,write_script_tags')}&redirect_uri=${encodeURIComponent(process.env.SHOPIFY_REDIRECT_URI)}&state=${state}`;
   json(res, 200, { installUrl });
 });
 app.get('/api/shopify/callback', requireDb, async (req, res) => {
-  const shop = normalizeShop(req.query.shop);
-  const code = String(req.query.code || '');
-  const state = String(req.query.state || '');
-  const hmac = String(req.query.hmac || '');
-  const record = await db.collection('oauth_states').findOne({ state, shop, expiresAt: { $gt: new Date() } });
-  const dashboard = `${process.env.FRONTEND_URL || '/'}dashboard.html`;
-  if (!record || !code || !shop || !hmac) return res.redirect(`${dashboard}?shopify=error&message=${encodeURIComponent('The Shopify authorization expired or was not completed. Please start installation again.')}`);
-  const query = { ...req.query, shop }; delete query.signature; delete query.hmac;
-  const message = Object.keys(query).sort().map((key) => `${key}=${Array.isArray(query[key]) ? query[key].join(',') : query[key]}`).join('&');
+  const { shop, code, state, hmac } = req.query; const record = await db.collection('oauth_states').findOne({ state, shop, expiresAt: { $gt: new Date() } });
+  if (!record || !code || !shop || !hmac) return res.status(400).send('Invalid or expired Shopify authorization.');
+  const query = { ...req.query }; delete query.signature; delete query.hmac; const message = Object.keys(query).sort().map((key) => `${key}=${Array.isArray(query[key]) ? query[key].join(',') : query[key]}`).join('&');
   const digest = crypto.createHmac('sha256', process.env.SHOPIFY_API_SECRET).update(message).digest('hex');
-  if (digest.length !== hmac.length || !crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(hmac))) return res.redirect(`${dashboard}?shopify=error&message=${encodeURIComponent('Shopify authorization could not be verified. Please start installation again.')}`);
+  if (digest.length !== String(hmac).length || !crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(String(hmac)))) return res.status(400).send('Invalid Shopify signature.');
   const tokenResponse = await fetch(`https://${shop}/admin/oauth/access_token`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_id: process.env.SHOPIFY_API_KEY, client_secret: process.env.SHOPIFY_API_SECRET, code }) });
-  if (!tokenResponse.ok) {
-    const details = await tokenResponse.text().catch(() => '');
-    console.error('Shopify token exchange failed:', tokenResponse.status, details);
-    return res.redirect(`${dashboard}?shopify=error&message=${encodeURIComponent('Shopify rejected the app credentials or redirect URL. Please check the Shopify app configuration.')}`);
-  }
+  if (!tokenResponse.ok) return res.status(502).send('Shopify token exchange failed.');
   const token = await tokenResponse.json();
   const trial = await getTrialSettings();
   const merchant = await db.collection('merchants').findOne({ _id: record.merchantId });
@@ -378,6 +331,38 @@ app.get('/api/merchant/billing', requireDb, requireMerchantSession, async (req, 
   const usage = merchant.chatUsageMonth === new Date().toISOString().slice(0, 7) ? (merchant.chatUsage || 0) : 0;
   json(res, 200, { plan, planName: plans[plan]?.name || plan, trialActive: trial, trialEndsAt: merchant.trialEndsAt || null, subscriptionStatus: merchant.subscriptionStatus || null, paidAt: merchant.paidAt || null, currentPeriodEnd: merchant.currentPeriodEnd || null, autopay: merchant.autopay !== false, cancelAtPeriodEnd: merchant.cancelAtPeriodEnd === true, email: merchant.email || null, amount: plans[plan]?.price || null, currency: 'USD', stripeCustomerId: merchant.stripeCustomerId || null, stripeSubscriptionId: merchant.stripeSubscriptionId || null, stripeInvoiceId: merchant.stripeInvoiceId || null, model: trial || (paid && plan === 'premium') ? plans.premium.model : (plans[plan]?.model || 'gpt-4o-mini'), usage, limit, chatLocked: (!trial && !paid) || usage >= limit });
 });
+const websiteFaq = JSON.parse(fs.readFileSync(new URL('./website-fqa.json', import.meta.url), 'utf8'));
+const normalizeQuestion = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+const faqTokens = (value) => new Set(normalizeQuestion(value).split(/\s+/).filter((token) => token.length > 2));
+const findWebsiteFaqAnswer = (message) => {
+  const queryTokens = faqTokens(message);
+  if (!queryTokens.size) return null;
+  let best = null;
+  for (const item of websiteFaq) {
+    const questionTokens = faqTokens(item.question);
+    const overlap = [...queryTokens].filter((token) => questionTokens.has(token)).length;
+    const score = overlap / Math.max(questionTokens.size, 1);
+    if (!best || score > best.score) best = { answer: item.answer, score, overlap };
+  }
+  return best && best.overlap >= 2 && best.score >= 0.25 ? best.answer : null;
+};
+app.post('/api/website-chat', async (req, res) => {
+  const message = String(req.body?.message || '').trim().slice(0, 2000);
+  if (!message) return json(res, 400, { error: 'Please enter a question.' });
+  const faqAnswer = findWebsiteFaqAnswer(message);
+  if (faqAnswer) return json(res, 200, { success: true, reply: faqAnswer, source: 'website-faq' });
+  const fallback = 'I can help with zavoka AI features, pricing, plans, installation, the free trial, Enterprise, or support. What would you like to know?';
+  if (!process.env.OPENAI_API_KEY) return json(res, 200, { success: true, reply: fallback, source: 'fallback' });
+  try {
+    const response = await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` }, body: JSON.stringify({ model: process.env.OPENAI_WEBSITE_MODEL || 'gpt-4o-mini', temperature: 0.2, max_tokens: 350, messages: [{ role: 'system', content: `You are the public zavoka AI website assistant. Answer only from this official FAQ JSON:\n${JSON.stringify(websiteFaq)}\nIf the FAQ does not answer the question, say you do not have that information and direct the visitor to support@layboka.ai. Never invent store products, inventory, prices, shipping, discounts, refunds, or policies.` }, { role: 'user', content: message }] }) });
+    if (response.ok) {
+      const data = await response.json();
+      const reply = data.choices?.[0]?.message?.content?.trim();
+      if (reply) return json(res, 200, { success: true, reply, source: 'website-ai' });
+    }
+  } catch {}
+  return json(res, 200, { success: true, reply: fallback, source: 'fallback' });
+});
 app.post('/api/chat/message', requireDb, requireMerchantSession, async (req, res) => {
   try {
     const merchant = await db.collection('merchants').findOne({ _id: req.merchantId });
@@ -392,9 +377,10 @@ app.post('/api/chat/message', requireDb, requireMerchantSession, async (req, res
     if (merchant && merchant.chatUsageMonth !== month) await db.collection('merchants').updateOne({ _id: merchant._id }, { $set: { chatUsage: 0, chatUsageMonth: month } });
     const currentUsage = merchant?.chatUsageMonth === month ? (merchant.chatUsage || 0) : 0;
     if (currentUsage >= limit) return json(res, 402, { locked: true, limitReached: true, error: trial ? 'Your trial usage limit has been reached. Upgrade to continue.' : `This plan has reached its ${limit.toLocaleString()} monthly AI conversation limit.` });
-    let reply = 'I could not find that information for this store. Please ask me about our products, availability, shipping, returns, or store policies.';
+    let reply = 'I can help you discover products, compare options, understand pricing, start a 5-day trial, or learn how zavoka AI works. What would you like to know?';
+    const websiteKnowledge = `zavoka AI is an always-on AI Sales Executive for Shopify merchants. It chats with shoppers, recommends products, supports upsells and cross-sells, recovers abandoned carts, matches the merchant’s brand voice, provides live sales insights, and is available around the clock. Merchants can start a Premium trial with full features; there is no charge during the trial and no credit card is required. Installation starts from the Install section: enter a Shopify store URL and working email, then approve Shopify installation. Public monthly plans are Starter at $25/month with 600 AI conversations, Growth at $59/month with 1,400 conversations, and Premium at $149/month with 2,300 conversations. Plans can be canceled anytime. The website has Features, Pricing, Enterprise, About Us, Contact Us, Terms, Privacy, Merchant Login, and Install pages. zavoka should never claim a specific product, inventory item, discount, shipping time, refund policy, or store policy unless that information has been supplied by the connected merchant. For account, billing, Shopify installation, or support questions, direct the visitor to the relevant website page or Contact Us.`;
     if (process.env.OPENAI_API_KEY) {
-      const response = await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` }, body: JSON.stringify({ model: trial || plan === 'premium' ? plans.premium.model : (plans[plan]?.model || 'gpt-4o-mini'), temperature: 0.25, max_tokens: 450, messages: [{ role: 'system', content: `You are ${settings.agentName}, the AI Sales Executive for the Shopify store ${settings.storeName}. ${settings.behavior} Answer only with information supplied by this merchant's connected store catalog and policies. Do not mention zavoka website pricing, zavoka trials, zavoka Enterprise, zavoka support, website FAQ, or public company information. Never invent product, inventory, price, shipping, refund, discount, or policy details. If the store data does not answer the question, say: "I could not find that information for this store. Please contact the store team."` }, { role: 'user', content: String(req.body.message || '').slice(0, 2000) }] }) });
+      const response = await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` }, body: JSON.stringify({ model: trial || plan === 'premium' ? plans.premium.model : (plans[plan]?.model || 'gpt-4o-mini'), temperature: 0.25, max_tokens: 450, messages: [{ role: 'system', content: `You are ${settings.agentName}, the helpful zavoka AI website assistant for ${settings.storeName}. ${settings.behavior} Answer accurately using the following official website information:\n${websiteKnowledge}\nAnswer the visitor directly and concisely. If the question is about a merchant's actual products, explain that product catalog access must be connected and do not invent details.` }, { role: 'user', content: String(req.body.message || '').slice(0, 2000) }] }) });
       if (response.ok) { const data = await response.json(); reply = data.choices?.[0]?.message?.content?.trim() || reply; }
     }
     if (merchant) {
