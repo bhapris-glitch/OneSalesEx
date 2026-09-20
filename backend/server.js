@@ -351,7 +351,7 @@ app.post('/api/website-chat', async (req, res) => {
   if (!message) return json(res, 400, { error: 'Please enter a question.' });
   const faqAnswer = findWebsiteFaqAnswer(message);
   if (faqAnswer) return json(res, 200, { success: true, reply: faqAnswer, source: 'website-faq' });
-  const fallback = 'I can help with zavoka AI features, pricing, plans, installation, the free trial, Enterprise, or support. What would you like to know?';
+  const fallback = 'I can help with zavoka inquiry like features, pricing, plans, installation, the free trial, Enterprise, or support. What would you like to know?';
   if (!process.env.OPENAI_API_KEY) return json(res, 200, { success: true, reply: fallback, source: 'fallback' });
   try {
     const response = await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` }, body: JSON.stringify({ model: process.env.OPENAI_WEBSITE_MODEL || 'gpt-4o-mini', temperature: 0.2, max_tokens: 350, messages: [{ role: 'system', content: `You are the public zavoka AI website assistant. Answer only from this official FAQ JSON:\n${JSON.stringify(websiteFaq)}\nIf the FAQ does not answer the question, say you do not have that information and direct the visitor to support@layboka.ai. Never invent store products, inventory, prices, shipping, discounts, refunds, or policies.` }, { role: 'user', content: message }] }) });
