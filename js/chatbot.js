@@ -3,7 +3,9 @@
   const merchantId=localStorage.lbMerchantId||'';
   const merchantSession=localStorage.lbMerchantSession||'';
   const root=document.createElement('div');
-  root.innerHTML=`<button class="lb-launcher" aria-label="Open zavoka assistant"><span>✦</span></button><section class="lb-chat" aria-label="zavoka chat"><header><span class="lb-avatar" id="lbAvatar">♙</span><div class="lb-heading"><strong id="lbTitle">AI Sales Executive</strong><small><span class="lb-online-dot"></span> Online now</small></div><div class="lb-header-actions"><button class="lb-minimize" aria-label="Minimize chat">−</button><button class="lb-close" aria-label="Close chat">×</button></div></header><div class="lb-messages"><p class="lb-assistant" id="lbWelcome">Hi! 👋 I’m your AI Sales Executive. How can I help you find the perfect product today?</p></div><form><input placeholder="Ask about our products…" autocomplete="off" aria-label="Message zavoka AI"><button aria-label="Send message">➤</button></form></section>`;
+  root.className='lb-merchant-widget';
+  const defaultAvatar='magnific_close-crop-headtoneck-of-_KjICgr5kqp_1.png';
+  root.innerHTML=`<button class="lb-launcher" aria-label="Open zavoka assistant"><img id="lbLauncherAvatar" src="${defaultAvatar}" alt="AI Sales Executive"></button><section class="lb-chat" aria-label="zavoka chat"><header><span class="lb-avatar" id="lbAvatar"><img src="${defaultAvatar}" alt="AI Sales Executive"></span><div class="lb-heading"><strong id="lbTitle">AI Sales Executive</strong><small><span class="lb-online-dot"></span> Online now</small></div><div class="lb-header-actions"><button class="lb-minimize" aria-label="Minimize chat">−</button><button class="lb-close" aria-label="Close chat">×</button></div></header><div class="lb-messages"><p class="lb-assistant" id="lbWelcome">Hi! 👋 I’m your AI Sales Executive. How can I help you find the perfect product today?</p></div><form><input placeholder="Ask about our products…" autocomplete="off" aria-label="Message zavoka AI"><button aria-label="Send message">➤</button></form></section>`;
   document.body.append(root);
 
   const chat=root.querySelector('.lb-chat');
@@ -30,6 +32,7 @@
   ];
 
   const getWebsiteAnswer=(text)=>websiteAnswers.find(({test})=>test.test(text))?.answer;
+  const fallbackAnswer='I can help with zavoka AI features, pricing, Shopify installation, the free trial, merchant login, or support. What would you like to know?';
 
   const addMessage=(text,kind='assistant')=>{
     const p=document.createElement('p');
@@ -109,13 +112,11 @@
       root.querySelector('#lbTitle').textContent=`${data.settings.agentName} · ${data.settings.storeName}`;
     root.querySelector('#lbWelcome').textContent=data.settings.welcomeMessage;
     root.style.setProperty('--orange',data.settings.themeColor);
-    if(data.settings.agentPic){
-      const avatar=root.querySelector('#lbAvatar');
-      avatar.textContent='';
-      avatar.style.backgroundImage=`url("${data.settings.agentPic.replace(/"/g,'')}")`;
-      avatar.style.backgroundSize='cover';
-      avatar.style.backgroundPosition='center';
-    }
+    root.style.setProperty('--merchant-avatar-border',data.settings.avatarBorderColor||'#000000');
+    const avatarSource=data.settings.agentPic||defaultAvatar;
+    const avatarUrl=avatarSource.replace(/"/g,'&quot;');
+    root.querySelector('#lbAvatar img').src=avatarUrl;
+    root.querySelector('#lbLauncherAvatar').src=avatarUrl;
 
     if(paid){
       setLocked(false);
@@ -162,15 +163,25 @@
       addMessage(knownAnswer);
       return;
     }
+    if(!API||!merchantId||!merchantSession){
+      addMessage(fallbackAnswer);
+      messages.scrollTop=messages.scrollHeight;
+      return;
+    }
     try{
       const response=await fetch(`${API}/api/chat/message`,{method:'POST',headers:{'Content-Type':'application/json','x-merchant-session':merchantSession},body:JSON.stringify({message:text,merchantId,visitorId:localStorage.lbVisitorId||(localStorage.lbVisitorId=crypto.randomUUID())})});
-      const data=await response.json();
+      let data={};
+      try{ data=await response.json(); }catch{}
       if(data.locked){
         setLocked(true);
         addMessage(`${data.error||'Your trial has ended.'} Choose a paid plan to unlock your AI Sales Executive.`);
-      }else addMessage(data.reply||'Please try again.');
+      }else if(response.ok&&data.reply){
+        addMessage(data.reply);
+      }else{
+        addMessage(fallbackAnswer);
+      }
     }catch{
-      addMessage('I’m temporarily unavailable. Please try again shortly.');
+      addMessage(fallbackAnswer);
     }
     messages.scrollTop=messages.scrollHeight;
   };
