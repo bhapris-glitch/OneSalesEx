@@ -1,6 +1,5 @@
 import 'dotenv/config';
 import crypto from 'node:crypto';
-import fs from 'node:fs';
 import express from 'express';
 import { MongoClient, ObjectId } from 'mongodb';
 import Stripe from 'stripe';
@@ -31,7 +30,7 @@ const requireAdmin = (req, res, next) => {
 };
 const isTrialActive = (merchant) => merchant?.trialStatus === 'active' && merchant.trialEndsAt && new Date(merchant.trialEndsAt) > new Date();
 const isPaid = (merchant) => ['active', 'trialing'].includes(merchant?.subscriptionStatus) && merchant?.stripeSubscriptionId && (!merchant.currentPeriodEnd || new Date(merchant.currentPeriodEnd) > new Date());
-const defaultSettings = { agentName: 'Emily', agentPic: '', storeName: 'zavoka', themeColor: '#FF4616', primaryColor: '#FF4616', chatBackground: '#0D1009', accentColor: '#39D353', avatarBorderColor: '#000000', behavior: 'Friendly, helpful, concise, and focused on improving sales.', welcomeMessage: 'Hi! I’m Emily. How can I help you shop today?' };
+const defaultSettings = { agentName: 'Emily', agentPic: '', storeName: 'zavoka', themeColor: '#FF4616', primaryColor: '#FF4616', chatBackground: '#0D1009', accentColor: '#39D353', behavior: 'Friendly, helpful, concise, and focused on improving sales.', welcomeMessage: 'Hi! I’m Emily. How can I help you shop today?', enableRecommendations: true, enableUpsells: true, enableCoupons: true, enableCartActions: true };
 const mongo = new MongoClient(process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017');
 let db;
 
@@ -246,7 +245,7 @@ app.put('/api/merchant/settings', requireDb, requireMerchantSession, async (req,
   const id = String(req.body.merchantId || '');
   if (!ObjectId.isValid(id)) return json(res, 400, { error: 'A valid merchantId is required.' });
   const color = (value, fallback) => /^#[0-9a-f]{6}$/i.test(String(value || '')) ? String(value) : fallback;
-  const settings = { ...defaultSettings, agentName: String(req.body.agentName || defaultSettings.agentName).slice(0, 80), agentPic: String(req.body.agentPic || '').slice(0, 500), storeName: String(req.body.storeName || defaultSettings.storeName).slice(0, 120), primaryColor: color(req.body.primaryColor, defaultSettings.primaryColor), chatBackground: color(req.body.chatBackground, defaultSettings.chatBackground), accentColor: color(req.body.accentColor, defaultSettings.accentColor), avatarBorderColor: color(req.body.avatarBorderColor, defaultSettings.avatarBorderColor), themeColor: color(req.body.primaryColor || req.body.themeColor, defaultSettings.themeColor), behavior: String(req.body.behavior || defaultSettings.behavior).slice(0, 1000), welcomeMessage: String(req.body.welcomeMessage || defaultSettings.welcomeMessage).slice(0, 500) };
+  const settings = { ...defaultSettings, agentName: String(req.body.agentName || defaultSettings.agentName).slice(0, 80), agentPic: String(req.body.agentPic || '').slice(0, 500), storeName: String(req.body.storeName || defaultSettings.storeName).slice(0, 120), primaryColor: color(req.body.primaryColor, defaultSettings.primaryColor), chatBackground: color(req.body.chatBackground, defaultSettings.chatBackground), accentColor: color(req.body.accentColor, defaultSettings.accentColor), themeColor: color(req.body.primaryColor || req.body.themeColor, defaultSettings.themeColor), behavior: String(req.body.behavior || defaultSettings.behavior).slice(0, 1000), welcomeMessage: String(req.body.welcomeMessage || defaultSettings.welcomeMessage).slice(0, 500), enableRecommendations: req.body.enableRecommendations !== false && req.body.enableRecommendations !== 'false', enableUpsells: req.body.enableUpsells !== false && req.body.enableUpsells !== 'false', enableCoupons: req.body.enableCoupons !== false && req.body.enableCoupons !== 'false', enableCartActions: req.body.enableCartActions !== false && req.body.enableCartActions !== 'false' };
   const merchant = await db.collection('merchants').findOne({ _id: new ObjectId(id) });
   await db.collection('merchants').updateOne({ _id: new ObjectId(id) }, { $set: { settings, updatedAt: new Date() } });
   await notifyMerchant(merchant, 'Executive settings updated', 'Your zavoka AI Sales Executive settings were updated successfully.');
@@ -331,38 +330,6 @@ app.get('/api/merchant/billing', requireDb, requireMerchantSession, async (req, 
   const usage = merchant.chatUsageMonth === new Date().toISOString().slice(0, 7) ? (merchant.chatUsage || 0) : 0;
   json(res, 200, { plan, planName: plans[plan]?.name || plan, trialActive: trial, trialEndsAt: merchant.trialEndsAt || null, subscriptionStatus: merchant.subscriptionStatus || null, paidAt: merchant.paidAt || null, currentPeriodEnd: merchant.currentPeriodEnd || null, autopay: merchant.autopay !== false, cancelAtPeriodEnd: merchant.cancelAtPeriodEnd === true, email: merchant.email || null, amount: plans[plan]?.price || null, currency: 'USD', stripeCustomerId: merchant.stripeCustomerId || null, stripeSubscriptionId: merchant.stripeSubscriptionId || null, stripeInvoiceId: merchant.stripeInvoiceId || null, model: trial || (paid && plan === 'premium') ? plans.premium.model : (plans[plan]?.model || 'gpt-4o-mini'), usage, limit, chatLocked: (!trial && !paid) || usage >= limit });
 });
-const websiteFaq = JSON.parse(fs.readFileSync(new URL('./website-fqa.json', import.meta.url), 'utf8'));
-const normalizeQuestion = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-const faqTokens = (value) => new Set(normalizeQuestion(value).split(/\s+/).filter((token) => token.length > 2));
-const findWebsiteFaqAnswer = (message) => {
-  const queryTokens = faqTokens(message);
-  if (!queryTokens.size) return null;
-  let best = null;
-  for (const item of websiteFaq) {
-    const questionTokens = faqTokens(item.question);
-    const overlap = [...queryTokens].filter((token) => questionTokens.has(token)).length;
-    const score = overlap / Math.max(questionTokens.size, 1);
-    if (!best || score > best.score) best = { answer: item.answer, score, overlap };
-  }
-  return best && best.overlap >= 2 && best.score >= 0.25 ? best.answer : null;
-};
-app.post('/api/website-chat', async (req, res) => {
-  const message = String(req.body?.message || '').trim().slice(0, 2000);
-  if (!message) return json(res, 400, { error: 'Please enter a question.' });
-  const faqAnswer = findWebsiteFaqAnswer(message);
-  if (faqAnswer) return json(res, 200, { success: true, reply: faqAnswer, source: 'website-faq' });
-  const fallback = 'I can help with zavoka inquiry like features, pricing, plans, installation, the free trial, Enterprise, or support. What would you like to know?';
-  if (!process.env.OPENAI_API_KEY) return json(res, 200, { success: true, reply: fallback, source: 'fallback' });
-  try {
-    const response = await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` }, body: JSON.stringify({ model: process.env.OPENAI_WEBSITE_MODEL || 'gpt-4o-mini', temperature: 0.2, max_tokens: 350, messages: [{ role: 'system', content: `You are the public zavoka AI website assistant. Answer only from this official FAQ JSON:\n${JSON.stringify(websiteFaq)}\nIf the FAQ does not answer the question, say you do not have that information and direct the visitor to support@layboka.ai. Never invent store products, inventory, prices, shipping, discounts, refunds, or policies.` }, { role: 'user', content: message }] }) });
-    if (response.ok) {
-      const data = await response.json();
-      const reply = data.choices?.[0]?.message?.content?.trim();
-      if (reply) return json(res, 200, { success: true, reply, source: 'website-ai' });
-    }
-  } catch {}
-  return json(res, 200, { success: true, reply: fallback, source: 'fallback' });
-});
 app.post('/api/chat/message', requireDb, requireMerchantSession, async (req, res) => {
   try {
     const merchant = await db.collection('merchants').findOne({ _id: req.merchantId });
@@ -380,14 +347,14 @@ app.post('/api/chat/message', requireDb, requireMerchantSession, async (req, res
     let reply = 'I can help you discover products, compare options, understand pricing, start a 5-day trial, or learn how zavoka AI works. What would you like to know?';
     const websiteKnowledge = `zavoka AI is an always-on AI Sales Executive for Shopify merchants. It chats with shoppers, recommends products, supports upsells and cross-sells, recovers abandoned carts, matches the merchant’s brand voice, provides live sales insights, and is available around the clock. Merchants can start a Premium trial with full features; there is no charge during the trial and no credit card is required. Installation starts from the Install section: enter a Shopify store URL and working email, then approve Shopify installation. Public monthly plans are Starter at $25/month with 600 AI conversations, Growth at $59/month with 1,400 conversations, and Premium at $149/month with 2,300 conversations. Plans can be canceled anytime. The website has Features, Pricing, Enterprise, About Us, Contact Us, Terms, Privacy, Merchant Login, and Install pages. zavoka should never claim a specific product, inventory item, discount, shipping time, refund policy, or store policy unless that information has been supplied by the connected merchant. For account, billing, Shopify installation, or support questions, direct the visitor to the relevant website page or Contact Us.`;
     if (process.env.OPENAI_API_KEY) {
-      const response = await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` }, body: JSON.stringify({ model: trial || plan === 'premium' ? plans.premium.model : (plans[plan]?.model || 'gpt-4o-mini'), temperature: 0.25, max_tokens: 450, messages: [{ role: 'system', content: `You are ${settings.agentName}, the helpful zavoka AI website assistant for ${settings.storeName}. ${settings.behavior} Answer accurately using the following official website information:\n${websiteKnowledge}\nAnswer the visitor directly and concisely. If the question is about a merchant's actual products, explain that product catalog access must be connected and do not invent details.` }, { role: 'user', content: String(req.body.message || '').slice(0, 2000) }] }) });
+      const response = await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` }, body: JSON.stringify({ model: trial || plan === 'premium' ? plans.premium.model : (plans[plan]?.model || 'gpt-4o-mini'), temperature: 0.25, max_tokens: 450, messages: [{ role: 'system', content: `You are ${settings.agentName}, the helpful AI Sales Executive for the Shopify store ${settings.storeName}. ${settings.behavior} Answer shoppers about this connected store and use the merchant's product/catalog data when it is available. Do not call yourself a website assistant. Answer the visitor directly and concisely. Never invent products, prices, inventory, discounts, shipping times, refunds, or store policies.` }, { role: 'user', content: String(req.body.message || '').slice(0, 2000) }] }) });
       if (response.ok) { const data = await response.json(); reply = data.choices?.[0]?.message?.content?.trim() || reply; }
     }
     if (merchant) {
       await db.collection('merchants').updateOne({ _id: merchant._id }, { $inc: { chatUsage: 1 }, $set: { chatUsageMonth: month, updatedAt: new Date() } });
       await db.collection('activity_events').insertOne({ merchantId: merchant._id, type: 'chat', createdAt: new Date() });
     }
-    json(res, 200, { success: true, reply, settings, products: [], coupon: null, upsell: null });
+    json(res, 200, { success: true, reply, settings, features: { enableRecommendations: settings.enableRecommendations, enableUpsells: settings.enableUpsells, enableCoupons: settings.enableCoupons, enableCartActions: settings.enableCartActions }, products: [], coupon: null, upsell: null, checkout: false });
   } catch (error) { json(res, 500, { error: 'The AI assistant is temporarily unavailable.' }); }
 });
 app.post('/api/enterprise', requireDb, async (req, res) => {
