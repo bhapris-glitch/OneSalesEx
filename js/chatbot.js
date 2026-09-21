@@ -2,52 +2,48 @@
   const API=window.ZAVOKA_API||'';
   const merchantId=localStorage.lbMerchantId||'';
   const merchantSession=localStorage.lbMerchantSession||'';
+  const visitorId=localStorage.lbVisitorId||(localStorage.lbVisitorId=crypto.randomUUID());
   const root=document.createElement('div');
-  root.className='lb-merchant-widget';
-  const defaultAvatar='magnific_close-crop-headtoneck-of-_KjICgr5kqp_1.png';
-  root.innerHTML=`<button class="lb-launcher" aria-label="Open zavoka assistant"><img id="lbLauncherAvatar" src="${defaultAvatar}" alt="AI Sales Executive"></button><section class="lb-chat" aria-label="zavoka chat"><header><span class="lb-avatar" id="lbAvatar"><img src="${defaultAvatar}" alt="AI Sales Executive"></span><div class="lb-heading"><strong id="lbTitle">AI Sales Executive</strong><small><span class="lb-online-dot"></span> Online now</small></div><div class="lb-header-actions"><button class="lb-minimize" aria-label="Minimize chat">−</button><button class="lb-close" aria-label="Close chat">×</button></div></header><div class="lb-messages"><p class="lb-assistant" id="lbWelcome">Hi! 👋 I’m your AI Sales Executive. How can I help you find the perfect product today?</p></div><form><input placeholder="Ask about our products…" autocomplete="off" aria-label="Message zavoka AI"><button aria-label="Send message">➤</button></form></section>`;
+  root.innerHTML=`<button class="lb-launcher" aria-label="Open zavoka assistant"><span>✦</span></button><div class="lb-greeting" role="status"></div><section class="lb-chat" aria-label="zavoka chat"><header><span class="lb-avatar" id="lbAvatar">♙</span><div class="lb-heading"><strong id="lbTitle">AI Sales Executive</strong><small><span class="lb-online-dot"></span> Online now</small></div><div class="lb-header-actions"><button class="lb-minimize" aria-label="Minimize chat">−</button><button class="lb-close" aria-label="Close chat">×</button></div></header><div class="lb-messages"><p class="lb-assistant" id="lbWelcome">Hi! 👋 I’m your AI Sales Executive. How can I help you find the perfect product today?</p></div><form><input placeholder="Ask about our products…" autocomplete="off" aria-label="Message zavoka AI"><button aria-label="Send message">➤</button></form></section>`;
   document.body.append(root);
 
   const chat=root.querySelector('.lb-chat');
   const launcher=root.querySelector('.lb-launcher');
+  const greeting=root.querySelector('.lb-greeting');
   const messages=root.querySelector('.lb-messages');
   const form=root.querySelector('form');
   const input=root.querySelector('input');
   const sendButton=form.querySelector('button');
-  let locked=false;
-  let notice='';
-  let trialEndsAt=0;
-  let countdownMessage=null;
-  let countdownTimer=null;
-
-  const websiteAnswers=[
-    { test:/trial|free|credit card/i, answer:'You can start a 5-day Premium trial with full features and 100 AI chats. There is no charge during the trial and no credit card is required. Start from the Install section on the homepage.' },
-    { test:/price|pricing|cost|starter|growth|premium|plan/i, answer:'zavoka plans are Starter at $25/month with 600 AI conversations, Growth at $59/month with 1,400 conversations, and Premium at $149/month with 2,300 conversations. You can cancel anytime.' },
-    { test:/install|shopify|connect|setup/i, answer:'Installation starts in the Install section: enter your Shopify store URL and working email, click Install, then approve the Shopify installation. No developer is required.' },
-    { test:/feature|what.*do|recommend|cart|upsell/i, answer:'zavoka chats with shoppers, recommends products, supports upsells and cross-sells, helps recover abandoned carts, matches your brand voice, and provides live sales insights around the clock.' },
-    { test:/enterprise|high.?volume|custom/i, answer:'Enterprise includes custom AI configuration, a dedicated support team, and integrations with CRM, ERP, inventory, and other business systems. Request a consultation on the Enterprise page.' },
-    { test:/support|contact|email|help/i, answer:'For support, installation, pricing, or enterprise questions, contact support@layboka.ai from the Contact page.' },
-    { test:/cancel|change.*plan|upgrade/i, answer:'You can change or upgrade your plan whenever your store is ready, and plans can be canceled anytime.' },
-    { test:/about|who are|layboka/i, answer:'zavoka AI is an always-on AI Sales Executive for Shopify merchants, helping shoppers discover products, make confident decisions, and complete purchases.' }
-  ];
-
-  const getWebsiteAnswer=(text)=>websiteAnswers.find(({test})=>test.test(text))?.answer;
-  const fallbackAnswer='I can help with zavoka AI features, pricing, Shopify installation, the free trial, merchant login, or support. What would you like to know?';
+  let locked=false, notice='', trialEndsAt=0, countdownMessage=null, countdownTimer=null, typingMessage=null;
 
   const addMessage=(text,kind='assistant')=>{
     const p=document.createElement('p');
     p.className=`lb-${kind}`;
-    p.textContent=text;
+    p.textContent=String(text||'');
     messages.append(p);
     messages.scrollTop=messages.scrollHeight;
+    return p;
+  };
+
+  const showTyping=()=>{
+    if(typingMessage)return;
+    typingMessage=document.createElement('p');
+    typingMessage.className='lb-assistant lb-typing';
+    typingMessage.innerHTML='<span></span><span></span><span></span>';
+    messages.append(typingMessage);
+    messages.scrollTop=messages.scrollHeight;
+  };
+
+  const hideTyping=()=>{
+    typingMessage?.remove();
+    typingMessage=null;
   };
 
   const setLocked=(value)=>{
     locked=value;
     input.disabled=value;
     sendButton.disabled=value;
-    if(value) input.placeholder='Chat is locked — choose a paid plan to continue.';
-    else input.placeholder='Ask about products…';
+    input.placeholder=value?'Chat is locked — choose a paid plan to continue.':'Ask about products…';
   };
 
   const showNotice=(text)=>{
@@ -83,7 +79,6 @@
     messages.append(countdownMessage);
     updateCountdown();
     countdownTimer=setInterval(updateCountdown,1000);
-    messages.scrollTop=messages.scrollHeight;
   };
 
   const showRechargeButton=()=>{
@@ -93,96 +88,112 @@
     const button=document.createElement('button');
     button.type='button';
     button.textContent='RECHARGE NOW';
-    button.addEventListener('click',()=>location.assign('dashboard.html?tab=billing'));
+    button.onclick=()=>location.assign('dashboard.html?tab=billing');
     wrapper.append(button);
     messages.append(wrapper);
-    messages.scrollTop=messages.scrollHeight;
+  };
+
+  const addActionButton=(label,action,className='lb-action')=>{
+    const wrapper=document.createElement('p');
+    wrapper.className='lb-assistant lb-action-row';
+    const button=document.createElement('button');
+    button.type='button'; button.className=className; button.textContent=label; button.onclick=action;
+    wrapper.append(button); messages.append(wrapper);
+  };
+
+  const renderProducts=(products)=>{
+    if(!Array.isArray(products)||!products.length)return;
+    const carousel=document.createElement('div');
+    carousel.className='lb-product-carousel';
+    products.slice(0,6).forEach(product=>{
+      const card=document.createElement('article'); card.className='lb-product-card';
+      if(product.image){const image=document.createElement('img'); image.src=product.image; image.alt=product.title||'Product'; image.loading='lazy'; card.append(image);}
+      const title=document.createElement('strong'); title.textContent=product.title||'Recommended product'; card.append(title);
+      if(product.price!=null){const price=document.createElement('span'); price.textContent=product.price; card.append(price);}
+      const actions=document.createElement('div'); actions.className='lb-product-actions';
+      if(product.handle){const view=document.createElement('button'); view.type='button'; view.textContent='View'; view.onclick=()=>location.assign(`/products/${encodeURIComponent(product.handle)}`); actions.append(view);}
+      if(product.variantId&&root.dataset.cartActions!=='false'){const cart=document.createElement('button'); cart.type='button'; cart.textContent='Add to cart'; cart.onclick=()=>addToCart(product.variantId); actions.append(cart);}
+      card.append(actions); carousel.append(card);
+    });
+    messages.append(carousel); messages.scrollTop=messages.scrollHeight;
+  };
+
+  const addToCart=async(variantId)=>{
+    try{
+      const response=await fetch('/cart/add.js',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:variantId,quantity:1})});
+      if(!response.ok)throw new Error('Cart request failed');
+      addMessage('Great choice! I added it to your cart.');
+    }catch{ addMessage('I could not add that product to your cart. Please try again.'); }
+  };
+
+  const handleSalesActions=(data)=>{
+    const features=data.features||{};
+    root.dataset.cartActions=features.enableCartActions===false?'false':'true';
+    if(features.enableRecommendations!==false)renderProducts(data.products);
+    if(features.enableCoupons!==false&&data.coupon?.code){
+      addMessage(`🎁 You can use coupon ${data.coupon.code} and save ${data.coupon.discount||'the available discount'}.`);
+      addActionButton('Copy coupon',()=>navigator.clipboard?.writeText(data.coupon.code));
+    }
+    if(features.enableUpsells!==false&&data.upsell){
+      addMessage(`I recommend upgrading to ${data.upsell.title||'this option'}${data.upsell.extraPrice?` for ${data.upsell.extraPrice} more`:''}.`);
+      if(features.enableRecommendations!==false)renderProducts([data.upsell]);
+    }
+    if(features.enableCartActions!==false&&data.checkout){
+      addActionButton('Secure checkout',()=>location.assign('/checkout'));
+    }
   };
 
   const applyStatus=(data)=>{
     if(!data?.settings)return;
     const paid=data.paid===true;
-    const endsAt=data.trialEndsAt?new Date(data.trialEndsAt).getTime():0;
-    trialEndsAt=endsAt;
-    const remaining=endsAt-Date.now();
-    const hours=Math.ceil(remaining/3600000);
-    const usage=Number(data.usage||0);
-    const limit=Number(data.limit||100);
-
-      root.querySelector('#lbTitle').textContent=`${data.settings.agentName} · ${data.settings.storeName}`;
+    trialEndsAt=data.trialEndsAt?new Date(data.trialEndsAt).getTime():0;
+    const hours=Math.ceil((trialEndsAt-Date.now())/3600000);
+    const usage=Number(data.usage||0), limit=Number(data.limit||100);
+    root.querySelector('#lbTitle').textContent=`${data.settings.agentName} · ${data.settings.storeName}`;
     root.querySelector('#lbWelcome').textContent=data.settings.welcomeMessage;
-    root.style.setProperty('--orange',data.settings.themeColor);
-    root.style.setProperty('--merchant-avatar-border',data.settings.avatarBorderColor||'#000000');
-    const avatarSource=data.settings.agentPic||defaultAvatar;
-    const avatarUrl=avatarSource.replace(/"/g,'&quot;');
-    root.querySelector('#lbAvatar img').src=avatarUrl;
-    root.querySelector('#lbLauncherAvatar').src=avatarUrl;
-
-    if(paid){
-      setLocked(false);
-      return;
-    }
-
+    root.style.setProperty('--orange',data.settings.themeColor||'#FF4616');
+    if(data.settings.agentPic){const avatar=root.querySelector('#lbAvatar'); avatar.textContent=''; avatar.style.backgroundImage=`url("${String(data.settings.agentPic).replace(/"/g,'')}")`; avatar.style.backgroundSize='cover'; avatar.style.backgroundPosition='center';}
+    if(paid){setLocked(false);return;}
     if(data.trialActive){
-      if(usage>=limit){
-        setLocked(true);
-        showNotice(`Your Premium trial has used all ${limit} chats. Choose a paid plan to unlock your AI Sales Executive.`);
-      }else if(hours<=48){
-        showTrialCountdown();
-      }
+      if(usage>=limit){setLocked(true);showNotice(`Your Premium trial has used all ${limit} chats. Choose a paid plan to unlock your AI Sales Executive.`);}
+      else if(hours<=48)showTrialCountdown();
       return;
     }
-
-    setLocked(true);
-    showNotice('Your trial period has ended. Your Sales Executive is not available. Choose a paid plan to handle your customers immediately.');
-    showRechargeButton();
+    setLocked(true); showNotice('Your trial period has ended. Your Sales Executive is not available. Choose a paid plan to handle your customers immediately.'); showRechargeButton();
   };
 
   const refreshStatus=async()=>{
     if(!merchantId)return;
-    try{
-      const response=await fetch(`${API}/api/merchant/settings?merchantId=${encodeURIComponent(merchantId)}`,{headers:{'x-merchant-session':merchantSession}});
-      if(response.ok)applyStatus(await response.json());
-    }catch{}
+    try{const response=await fetch(`${API}/api/merchant/settings?merchantId=${encodeURIComponent(merchantId)}`,{headers:{'x-merchant-session':merchantSession}}); if(response.ok)applyStatus(await response.json());}catch{}
   };
 
-  launcher.onclick=()=>chat.classList.toggle('open');
+  const showWelcomeGreeting=()=>{
+    if(localStorage.lbChatWelcomed==='true')return;
+    localStorage.lbChatWelcomed='true';
+    greeting.textContent=root.querySelector('#lbWelcome').textContent;
+    greeting.classList.add('show');
+    setTimeout(()=>greeting.classList.remove('show'),6000);
+  };
+
+  launcher.onclick=()=>{chat.classList.toggle('open'); greeting.classList.remove('show'); if(chat.classList.contains('open'))input.focus();};
   root.querySelector('.lb-close').onclick=()=>chat.classList.remove('open');
   root.querySelector('.lb-minimize').onclick=()=>chat.classList.remove('open');
   refreshStatus();
+  setTimeout(showWelcomeGreeting,3500);
   setInterval(refreshStatus,60000);
 
   form.onsubmit=async event=>{
     event.preventDefault();
     const text=input.value.trim();
     if(!text||locked)return;
-    addMessage(text,'user');
-    input.value='';
-    const knownAnswer=getWebsiteAnswer(text);
-    if(knownAnswer){
-      addMessage(knownAnswer);
-      return;
-    }
-    if(!API||!merchantId||!merchantSession){
-      addMessage(fallbackAnswer);
-      messages.scrollTop=messages.scrollHeight;
-      return;
-    }
+    addMessage(text,'user'); input.value=''; input.disabled=true; sendButton.disabled=true; showTyping();
     try{
-      const response=await fetch(`${API}/api/chat/message`,{method:'POST',headers:{'Content-Type':'application/json','x-merchant-session':merchantSession},body:JSON.stringify({message:text,merchantId,visitorId:localStorage.lbVisitorId||(localStorage.lbVisitorId=crypto.randomUUID())})});
-      let data={};
-      try{ data=await response.json(); }catch{}
-      if(data.locked){
-        setLocked(true);
-        addMessage(`${data.error||'Your trial has ended.'} Choose a paid plan to unlock your AI Sales Executive.`);
-      }else if(response.ok&&data.reply){
-        addMessage(data.reply);
-      }else{
-        addMessage(fallbackAnswer);
-      }
-    }catch{
-      addMessage(fallbackAnswer);
-    }
+      const response=await fetch(`${API}/api/chat/message`,{method:'POST',headers:{'Content-Type':'application/json','x-merchant-session':merchantSession},body:JSON.stringify({message:text,merchantId,visitorId})});
+      const data=await response.json().catch(()=>({}));
+      hideTyping();
+      if(data.locked){setLocked(true);addMessage(`${data.error||'Your trial has ended.'} Choose a paid plan to unlock your AI Sales Executive.`);}
+      else{addMessage(data.reply||'Please try again.');handleSalesActions(data);input.disabled=false;sendButton.disabled=false;}
+    }catch{hideTyping();addMessage('I’m temporarily unavailable. Please try again shortly.');input.disabled=false;sendButton.disabled=false;}
     messages.scrollTop=messages.scrollHeight;
   };
 })();
