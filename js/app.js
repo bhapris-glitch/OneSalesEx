@@ -39,7 +39,7 @@ if(form) form.addEventListener('submit',async event=>{
   event.preventDefault();
   const status=document.getElementById('installStatus');
   const shop=document.getElementById('shopUrl').value.trim();
-  const email=document.getElementById('workEmail').value.trim();
+  const email=document.getElementById('workEmail')?.value.trim()||'';
   status.textContent=selectedPlan?'Opening secure Stripe Checkout…':'Preparing your secure installation…';
   try{
     const endpoint=selectedPlan?'/api/checkout':'/api/install';
