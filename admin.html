@@ -35,7 +35,7 @@
     </aside>
 
     <main class="admin-main">
-      <header class="admin-topbar"><button class="admin-menu" id="adminMenu" type="button" aria-label="Open navigation">☰</button><div><span class="eyebrow">LAYBOKA ADMIN</span><h1 id="viewTitle">Platform overview</h1></div><div class="admin-top-actions"><span class="admin-live"><i></i> Live</span><button class="button button-small outline" id="refreshAdmin" type="button">↻ Refresh</button></div></header>
+      <header class="admin-topbar"><button class="admin-menu" id="adminMenu" type="button" aria-label="Open navigation">☰</button><div><span class="eyebrow">ZAVOKA ADMIN</span><h1 id="viewTitle">Platform overview</h1></div><div class="admin-top-actions"><span class="admin-live"><i></i> Live</span><button class="button button-small outline" id="refreshAdmin" type="button">↻ Refresh</button></div></header>
       <div class="admin-auth-bar"><label>Admin access key<input id="adminKey" type="password" placeholder="Enter ADMIN_API_KEY"></label><button class="button button-small" id="saveAdminKey" type="button">Unlock dashboard</button><span id="adminStatus">Enter your admin key to load live data.</span></div>
 
       <section class="admin-view active" id="view-overview">
@@ -48,7 +48,7 @@
   </div>
 <script>
 (() => {
-  const api=(window.LAYBOKA_API||'').replace(/\/$/,'');
+  const api=(window.ZAVOKA_API||'').replace(/\/$/,'');
   const $=id=>document.getElementById(id);
   const keyInput=$('adminKey'), status=$('adminStatus');
   const key=()=>keyInput.value.trim()||localStorage.getItem('lbAdminKey')||'';
