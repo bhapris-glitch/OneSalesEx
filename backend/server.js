@@ -168,6 +168,7 @@ app.post('/api/shopify/webhooks/app-uninstalled', express.raw({ type: 'applicati
 app.use(express.json({ limit: '100kb' }));
 app.use((req, res, next) => { res.set('Access-Control-Allow-Origin', process.env.FRONTEND_URL || '*'); res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Merchant-Session, X-Admin-Key'); res.set('Access-Control-Allow-Methods', 'GET,POST,PUT,OPTIONS'); req.method === 'OPTIONS' ? res.sendStatus(204) : next(); });
 
+app.get('/', (req, res) => json(res, 200, { ok: true, service: 'zavoka-api', message: 'API is online. Use /api/health for service status.' }));
 app.get('/api/health', (req, res) => json(res, 200, { ok: Boolean(db), service: 'zavoka-api' }));
 app.get('/api/plans', (req, res) => json(res, 200, { plans }));
 app.post('/api/install', requireDb, async (req, res) => {
@@ -288,15 +289,19 @@ app.get('/api/shopify/callback', requireDb, async (req, res) => {
   res.redirect(`${process.env.FRONTEND_URL || '/'}/dashboard.html?shopify=connected&merchantId=${record.merchantId}`);
 });
 app.post('/api/checkout', requireDb, async (req, res) => {
-  const plan = plans[req.body.plan]; const shop = normalizeShop(req.body.shop); const email = String(req.body.email || '').trim().toLowerCase();
+  const plan = plans[req.body.plan];
+  let shop = normalizeShop(req.body.shop);
+  const email = String(req.body.email || '').trim().toLowerCase();
   if (!stripe) return json(res, 503, { error: 'Paid checkout is not configured yet. Please try the free trial or contact support.' });
   const merchantId = String(req.body.merchantId || '');
   if (!process.env.FRONTEND_URL) return json(res, 503, { error: 'FRONTEND_URL is not configured on the server.' });
   if (!plan) return json(res, 400, { error: 'Choose a valid subscription plan.' });
   if (!isRealConfigValue(plan.stripePriceId, 'price_')) return json(res, 503, { error: `${plan.name} checkout is not configured yet. Please try the free trial or contact support.` });
   if (!validEmail(email)) return json(res, 400, { error: 'Enter a valid billing email.' });
-  if (!shop) return json(res, 400, { error: 'Enter a valid Shopify store URL, such as your-store.myshopify.com.' });
   const filter = ObjectId.isValid(merchantId) ? { _id: new ObjectId(merchantId) } : { shop };
+  const existingMerchant = ObjectId.isValid(merchantId) ? await db.collection('merchants').findOne(filter) : null;
+  shop = shop || existingMerchant?.shop;
+  if (!shop) return json(res, 400, { error: 'Enter a valid Shopify store URL, such as your-store.myshopify.com.' });
   const merchantUpdate = { $set: { updatedAt: new Date() }, $setOnInsert: { createdAt: new Date() } };
   merchantUpdate.$set.shop = shop;
   if (email) merchantUpdate.$set.email = email;
