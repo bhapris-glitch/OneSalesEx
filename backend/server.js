@@ -31,8 +31,21 @@ const requireAdmin = (req, res, next) => {
 const isTrialActive = (merchant) => merchant?.trialStatus === 'active' && merchant.trialEndsAt && new Date(merchant.trialEndsAt) > new Date();
 const isPaid = (merchant) => ['active', 'trialing'].includes(merchant?.subscriptionStatus) && merchant?.stripeSubscriptionId && (!merchant.currentPeriodEnd || new Date(merchant.currentPeriodEnd) > new Date());
 const defaultSettings = { agentName: 'Emily', agentPic: '', storeName: 'zavoka', themeColor: '#FF4616', primaryColor: '#FF4616', chatBackground: '#0D1009', accentColor: '#39D353', behavior: 'Friendly, helpful, concise, and focused on improving sales.', welcomeMessage: 'Hi! I’m Emily. How can I help you shop today?' };
-const mongo = new MongoClient(process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017');
+const mongoUri = String(process.env.MONGODB_URI || '').trim();
+if (!mongoUri) console.warn('MONGODB_URI is not configured; MongoDB startup will fail until it is set.');
+const mongo = mongoUri ? new MongoClient(mongoUri, {
+  serverSelectionTimeoutMS: Number(process.env.MONGODB_SERVER_SELECTION_TIMEOUT_MS || 10000),
+  connectTimeoutMS: Number(process.env.MONGODB_CONNECT_TIMEOUT_MS || 10000),
+  maxPoolSize: Number(process.env.MONGODB_MAX_POOL_SIZE || 20)
+});
 let db;
+let mongoReady = false;
+
+if (mongo) {
+  mongo.on('serverOpening', () => { mongoReady = true; });
+  mongo.on('serverClosed', () => { mongoReady = false; });
+  mongo.on('topologyClosed', () => { mongoReady = false; });
+}
 
 const json = (res, status, data) => res.status(status).json(data);
 const validEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || ''));
@@ -51,7 +64,7 @@ const normalizeShop = (value) => {
     return null;
   }
 };
-const requireDb = (req, res, next) => db ? next() : json(res, 503, { error: 'Database is not connected.' });
+const requireDb = (req, res, next) => db && mongoReady ? next() : json(res, 503, { error: 'Database is not connected.' });
 const requireMerchantSession = async (req, res, next) => {
   const merchantId = String(req.query.merchantId || req.body?.merchantId || '');
   const session = String(req.headers['x-merchant-session'] || req.query.session || '');
@@ -168,8 +181,17 @@ app.post('/api/shopify/webhooks/app-uninstalled', express.raw({ type: 'applicati
 app.use(express.json({ limit: '100kb' }));
 app.use((req, res, next) => { res.set('Access-Control-Allow-Origin', process.env.FRONTEND_URL || '*'); res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Merchant-Session, X-Admin-Key'); res.set('Access-Control-Allow-Methods', 'GET,POST,PUT,OPTIONS'); req.method === 'OPTIONS' ? res.sendStatus(204) : next(); });
 
-app.get('/', (req, res) => json(res, 200, { ok: true, service: 'zavoka-api', message: 'API is online. Use /api/health for service status.' }));
-app.get('/api/health', (req, res) => json(res, 200, { ok: Boolean(db), service: 'zavoka-api' }));
+app.get('/api/health', async (req, res) => {
+  if (!db || !mongoReady) return json(res, 503, { ok: false, database: 'disconnected', service: 'zavoka-api' });
+  try {
+    await db.command({ ping: 1 });
+    json(res, 200, { ok: true, database: 'connected', db: db.databaseName, service: 'zavoka-api' });
+  } catch (error) {
+    mongoReady = false;
+    console.error('MongoDB health check failed:', error.message);
+    json(res, 503, { ok: false, database: 'disconnected', service: 'zavoka-api' });
+  }
+});
 app.get('/api/plans', (req, res) => json(res, 200, { plans }));
 app.post('/api/install', requireDb, async (req, res) => {
   const shop = normalizeShop(req.body.shop);
@@ -289,19 +311,15 @@ app.get('/api/shopify/callback', requireDb, async (req, res) => {
   res.redirect(`${process.env.FRONTEND_URL || '/'}/dashboard.html?shopify=connected&merchantId=${record.merchantId}`);
 });
 app.post('/api/checkout', requireDb, async (req, res) => {
-  const plan = plans[req.body.plan];
-  let shop = normalizeShop(req.body.shop);
-  const email = String(req.body.email || '').trim().toLowerCase();
+  const plan = plans[req.body.plan]; const shop = normalizeShop(req.body.shop); const email = String(req.body.email || '').trim().toLowerCase();
   if (!stripe) return json(res, 503, { error: 'Paid checkout is not configured yet. Please try the free trial or contact support.' });
   const merchantId = String(req.body.merchantId || '');
   if (!process.env.FRONTEND_URL) return json(res, 503, { error: 'FRONTEND_URL is not configured on the server.' });
   if (!plan) return json(res, 400, { error: 'Choose a valid subscription plan.' });
   if (!isRealConfigValue(plan.stripePriceId, 'price_')) return json(res, 503, { error: `${plan.name} checkout is not configured yet. Please try the free trial or contact support.` });
   if (!validEmail(email)) return json(res, 400, { error: 'Enter a valid billing email.' });
-  const filter = ObjectId.isValid(merchantId) ? { _id: new ObjectId(merchantId) } : { shop };
-  const existingMerchant = ObjectId.isValid(merchantId) ? await db.collection('merchants').findOne(filter) : null;
-  shop = shop || existingMerchant?.shop;
   if (!shop) return json(res, 400, { error: 'Enter a valid Shopify store URL, such as your-store.myshopify.com.' });
+  const filter = ObjectId.isValid(merchantId) ? { _id: new ObjectId(merchantId) } : { shop };
   const merchantUpdate = { $set: { updatedAt: new Date() }, $setOnInsert: { createdAt: new Date() } };
   merchantUpdate.$set.shop = shop;
   if (email) merchantUpdate.$set.email = email;
@@ -410,5 +428,19 @@ app.get('/api/dashboard', requireDb, requireMerchantSession, async (req, res) =>
 });
 app.use((req, res) => json(res, 404, { error: 'Route not found' }));
 
-async function start() { await mongo.connect(); db = mongo.db(process.env.MONGODB_DB || 'zavoka'); await Promise.all([db.collection('merchants').createIndex({ shop: 1 }, { unique: true, sparse: true }), db.collection('oauth_states').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 })]); setInterval(() => processTrialNotifications().catch((error) => console.error('Trial notification job failed:', error.message)), 15 * 60 * 1000); await processTrialNotifications(); app.listen(port, () => console.log(`zavoka API listening on ${port}`)); }
+async function start() {
+  if (!mongo) throw new Error('MONGODB_URI is not configured. Set it to the MongoDB Atlas connection string.');
+  await mongo.connect();
+  db = mongo.db(process.env.MONGODB_DB || 'zavoka_db');
+  await db.command({ ping: 1 });
+  mongoReady = true;
+  await Promise.all([
+    db.collection('merchants').createIndex({ shop: 1 }, { unique: true, sparse: true }),
+    db.collection('oauth_states').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 })
+  ]);
+  console.log(`MongoDB connected: ${db.databaseName}`);
+  setInterval(() => processTrialNotifications().catch((error) => console.error('Trial notification job failed:', error.message)), 15 * 60 * 1000);
+  await processTrialNotifications();
+  app.listen(port, () => console.log(`zavoka API listening on ${port}`));
+}
 start().catch((error) => { console.error('Startup failed:', error); process.exit(1); });
