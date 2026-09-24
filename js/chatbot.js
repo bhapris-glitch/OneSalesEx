@@ -172,6 +172,6 @@
     }catch{
       addMessage('I’m temporarily unavailable. Please try again shortly.');
     }
-    messages.scrollTop=messages.scrollHeight;
+  messages.scrollTop=messages.scrollHeight;
   };
 })();
