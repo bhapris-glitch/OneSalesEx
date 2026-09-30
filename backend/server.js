@@ -79,6 +79,54 @@ const sendEmail = async ({ to, subject, html }) => {
 const formatDate = value => value ? new Intl.DateTimeFormat('en-US', { dateStyle: 'full', timeStyle: 'long', timeZone: process.env.NOTIFICATION_TIME_ZONE || 'UTC' }).format(new Date(value)) : 'Not available';
 const emailLayout = (title, content) => `<div style="font-family:Arial,sans-serif;max-width:640px;margin:auto;color:#20251c"><h2 style="color:#ff4616">${title}</h2>${content}<hr><p style="color:#697064;font-size:13px">zavoka AI · Shopify AI Sales Executive<br>Need help? Reply to this email or contact support.</p></div>`;
 const notifyMerchant = (merchant, subject, html) => merchant?.email ? sendEmail({ to: merchant.email, subject, html: emailLayout(subject, html) }) : Promise.resolve(false);
+const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
+const shopifyHmacValid = (body, supplied) => {
+  if (!process.env.SHOPIFY_API_SECRET || !supplied) return false;
+  const digest = crypto.createHmac('sha256', process.env.SHOPIFY_API_SECRET).update(body).digest('base64');
+  return digest.length === String(supplied).length && crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(String(supplied)));
+};
+const syncShopProducts = async (merchant) => {
+  if (!merchant?.shopifyAccessToken || !merchant.shop) return 0;
+  const response = await fetch(`https://${merchant.shop}/admin/api/${shopifyApiVersion}/products.json?limit=250&status=active`, { headers: { 'X-Shopify-Access-Token': merchant.shopifyAccessToken } });
+  if (!response.ok) throw new Error(`Shopify product sync failed (${response.status}).`);
+  const data = await response.json();
+  const products = Array.isArray(data.products) ? data.products : [];
+  await db.collection('shop_products').updateMany({ shop: merchant.shop }, { $set: { status: 'archived' } });
+  for (const product of products) {
+    await db.collection('shop_products').updateOne({ shop: merchant.shop, productId: String(product.id) }, { $set: { shop: merchant.shop, productId: String(product.id), title: product.title, handle: product.handle, status: product.status, productUrl: `https://${merchant.shop}/products/${product.handle}`, image: product.image?.src || '', variants: (product.variants || []).map((variant) => ({ id: String(variant.id), title: variant.title, price: String(variant.price), available: variant.available !== false && (!variant.inventory_management || Number(variant.inventory_quantity) > 0 || variant.inventory_policy === 'continue') })).filter((variant) => variant.available), syncedAt: new Date() } }, { upsert: true });
+  }
+  return products.length;
+};
+const processAbandonedCartJobs = async () => {
+  if (!db) return;
+  const staleBefore = new Date(Date.now() - 15 * 60000);
+  await db.collection('abandoned_carts').updateMany({ status: 'processing', processingAt: { $lt: staleBefore } }, { $set: { status: 'pending', dueAt: new Date() }, $unset: { processingAt: '' } });
+  const due = await db.collection('abandoned_carts').find({ status: 'pending', emailConsented: true, dueAt: { $lte: new Date() } }).limit(50).toArray();
+  for (const cart of due) {
+    const claimed = await db.collection('abandoned_carts').updateOne({ _id: cart._id, status: 'pending', dueAt: { $lte: new Date() } }, { $set: { status: 'processing', processingAt: new Date() } });
+    if (!claimed.modifiedCount) continue;
+    const merchant = await db.collection('merchants').findOne({ _id: cart.merchantId });
+    if (!merchant?.shopifyConnected || merchant.automation?.abandonedCartEnabled !== true || cart.emailConsented !== true) {
+      await db.collection('abandoned_carts').updateOne({ _id: cart._id, status: 'processing' }, { $set: { status: 'not_eligible', updatedAt: new Date() }, $unset: { processingAt: '' } });
+      continue;
+    }
+    const emailHash = crypto.createHash('sha256').update(cart.email).digest('hex');
+    const suppressed = await db.collection('email_suppressions').findOne({ merchantId: cart.merchantId, emailHash });
+    if (suppressed) {
+      await db.collection('abandoned_carts').updateOne({ _id: cart._id }, { $set: { status: 'not_eligible', emailOptOut: true }, $unset: { processingAt: '' } });
+      continue;
+    }
+    const items = (cart.items || []).map((item) => `<li>${escapeHtml(item.title || item.name || 'Shopify item')} × ${Number(item.quantity) || 1}</li>`).join('');
+    const recoveryUrl = cart.recoveryUrl || `https://${cart.shop}/cart`;
+    const unsubscribeUrl = `${String(process.env.FRONTEND_URL || 'https://zavoka.com').replace(/\/$/, '')}/api/storefront/email/unsubscribe?token=${encodeURIComponent(cart.unsubscribeToken || '')}`;
+    const sent = await sendEmail({ to: cart.email, subject: 'Your cart is ready when you are', html: emailLayout('Still thinking it over?', `<p>Your Shopify cart is still available. Continue securely through the store checkout whenever you are ready.</p><ul>${items}</ul><p><a href="${escapeHtml(recoveryUrl)}" style="display:inline-block;padding:12px 18px;background:#a9ee47;color:#111;text-decoration:none;border-radius:8px;font-weight:bold">Return to your cart</a></p><p style="font-size:12px;color:#697064">You are receiving this because you opted in to marketing emails from this store.</p><p style="font-size:12px"><a href="${escapeHtml(unsubscribeUrl)}">Unsubscribe from future cart emails</a></p>`) });
+    if (sent) await db.collection('abandoned_carts').updateOne({ _id: cart._id }, { $set: { status: 'sent', sentAt: new Date() }, $unset: { processingAt: '' } });
+    else {
+      const attempts = (cart.attempts || 0) + 1;
+      await db.collection('abandoned_carts').updateOne({ _id: cart._id }, { $set: { status: attempts >= 5 ? 'failed' : 'pending', attempts, dueAt: new Date(Date.now() + 60 * 60000), lastErrorAt: new Date() }, $unset: { processingAt: '' } });
+    }
+  }
+};
 const trialEmail = (merchant, title, message) => {
   const end = merchant.trialEndsAt ? formatDate(merchant.trialEndsAt) : 'Calculated after Shopify approval';
   return notifyMerchant(merchant, `zavoka AI — ${title}`, `<p>${message}</p><table cellpadding="8"><tr><td><b>Store URL</b></td><td>${merchant.shop}</td></tr><tr><td><b>Plan</b></td><td>Free Premium trial</td></tr><tr><td><b>Start date/time</b></td><td>${formatDate(merchant.trialStartedAt)}</td></tr><tr><td><b>End date/time</b></td><td>${end}</td></tr><tr><td><b>Trial allowance</b></td><td>${merchant.trialChatLimit || defaultTrialSettings.chatLimit} AI chats</td></tr></table>`);
@@ -153,6 +201,65 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
   } catch (error) { res.status(400).send(`Webhook Error: ${error.message}`); }
 });
 
+const handleShopifyCommerceWebhook = (topic) => async (req, res) => {
+  if (!db) return res.sendStatus(503);
+  if (!shopifyHmacValid(req.body, req.headers['x-shopify-hmac-sha256'])) return res.sendStatus(401);
+  try {
+    const shop = normalizeShop(req.headers['x-shopify-shop-domain']);
+    if (!shop) return res.sendStatus(400);
+    const deliveryId = String(req.headers['x-shopify-webhook-id'] || '');
+    if (deliveryId && await db.collection('shopify_webhook_events').findOne({ deliveryId })) return res.sendStatus(200);
+    const payload = JSON.parse(req.body.toString('utf8'));
+    const merchant = await db.collection('merchants').findOne({ shop });
+    if (!merchant) return res.sendStatus(200);
+    const now = new Date();
+    if (topic.startsWith('orders/')) {
+      const orderId = String(payload.id || '');
+      if (orderId) {
+        const order = { shop, merchantId: merchant._id, orderId, orderNumber: String(payload.name || payload.order_number || orderId), financialStatus: payload.financial_status || 'unknown', fulfillmentStatus: payload.fulfillment_status || 'unfulfilled', total: Number(payload.total_price || 0), currency: payload.currency || 'USD', orderStatusUrl: payload.order_status_url || '', tracking: (payload.fulfillments || []).flatMap((fulfillment) => (fulfillment.tracking_numbers || []).map((number, index) => ({ number, url: fulfillment.tracking_urls?.[index] || fulfillment.tracking_url || '' }))), createdAt: payload.created_at ? new Date(payload.created_at) : now, updatedAt: now };
+        await db.collection('shopify_orders').updateOne({ shop, orderId }, { $set: order, $setOnInsert: { firstSeenAt: now } }, { upsert: true });
+        await db.collection('activity_events').insertOne({ merchantId: merchant._id, type: 'order', orderId, total: order.total, createdAt: now });
+        const checkoutId = String(payload.checkout_id || '');
+        if (checkoutId) await db.collection('abandoned_carts').updateMany({ shop, checkoutId, status: { $in: ['pending', 'processing', 'sent'] } }, { $set: { status: 'recovered', recoveredAt: now, orderId } });
+      }
+    } else if (topic.startsWith('fulfillments/')) {
+      const orderId = String(payload.order_id || '');
+      if (orderId) {
+        const tracking = (payload.tracking_numbers || []).map((number, index) => ({ number, url: payload.tracking_urls?.[index] || payload.tracking_url || '' }));
+        await db.collection('shopify_orders').updateOne({ shop, orderId }, { $set: { fulfillmentStatus: payload.status || 'fulfilled', ...(tracking.length ? { tracking } : {}), updatedAt: now } });
+      }
+    } else if (topic.startsWith('products/')) {
+      await syncShopProducts(merchant);
+    } else {
+      const checkoutId = String(payload.id || '');
+      const email = String(payload.email || payload.customer?.email || '').trim().toLowerCase();
+      if (checkoutId) {
+        await db.collection('shopify_checkouts').updateOne({ shop, checkoutId }, { $set: { shop, merchantId: merchant._id, checkoutId, total: Number(payload.total_price || 0), currency: payload.currency || 'USD', updatedAt: now }, $setOnInsert: { createdAt: payload.created_at ? new Date(payload.created_at) : now } }, { upsert: true });
+        const previous = await db.collection('abandoned_carts').findOne({ shop, checkoutId });
+        const consent = payload.email_marketing_consent?.state === 'subscribed' || payload.buyer_accepts_marketing === true;
+        const emailHash = consent && validEmail(email) ? crypto.createHash('sha256').update(email).digest('hex') : '';
+        const suppressed = emailHash ? await db.collection('email_suppressions').findOne({ merchantId: merchant._id, emailHash }) : null;
+        const enabled = merchant.automation?.abandonedCartEnabled === true;
+        const status = previous?.status === 'sent' || previous?.status === 'recovered' ? previous.status : (enabled && consent && validEmail(email) && !suppressed ? 'pending' : 'not_eligible');
+        const delayMinutes = Math.min(1440, Math.max(15, Number(merchant.automation?.abandonedCartDelayMinutes) || 60));
+        const checkoutItems = (payload.line_items || []).map((item) => ({ title: String(item.title || item.name || 'Shopify item').slice(0, 200), quantity: Number(item.quantity) || 1 }));
+        await db.collection('abandoned_carts').updateOne({ shop, checkoutId }, { $set: { shop, merchantId: merchant._id, checkoutId, checkoutToken: String(payload.token || ''), email: consent && validEmail(email) ? email : '', emailHash, emailConsented: consent, emailOptOut: previous?.emailOptOut === true || Boolean(suppressed), unsubscribeToken: previous?.unsubscribeToken || crypto.randomBytes(24).toString('hex'), items: checkoutItems, total: Number(payload.total_price || 0), currency: payload.currency || 'USD', recoveryUrl: payload.abandoned_checkout_url || '', status, updatedAt: now, ...(previous?.dueAt ? {} : { dueAt: new Date(now.getTime() + delayMinutes * 60000) }) }, $setOnInsert: { createdAt: now, attempts: 0 } }, { upsert: true });
+      }
+    }
+    if (deliveryId) await db.collection('shopify_webhook_events').insertOne({ deliveryId, shop, topic, receivedAt: now });
+    res.sendStatus(200);
+  } catch (error) { console.error(`Shopify ${topic} webhook failed:`, error.message); res.sendStatus(500); }
+};
+app.post('/api/shopify/webhooks/orders-create', express.raw({ type: 'application/json' }), handleShopifyCommerceWebhook('orders/create'));
+app.post('/api/shopify/webhooks/orders-update', express.raw({ type: 'application/json' }), handleShopifyCommerceWebhook('orders/updated'));
+app.post('/api/shopify/webhooks/checkouts-create', express.raw({ type: 'application/json' }), handleShopifyCommerceWebhook('checkouts/create'));
+app.post('/api/shopify/webhooks/checkouts-update', express.raw({ type: 'application/json' }), handleShopifyCommerceWebhook('checkouts/update'));
+app.post('/api/shopify/webhooks/products-create', express.raw({ type: 'application/json' }), handleShopifyCommerceWebhook('products/create'));
+app.post('/api/shopify/webhooks/products-update', express.raw({ type: 'application/json' }), handleShopifyCommerceWebhook('products/update'));
+app.post('/api/shopify/webhooks/products-delete', express.raw({ type: 'application/json' }), handleShopifyCommerceWebhook('products/delete'));
+app.post('/api/shopify/webhooks/fulfillments-create', express.raw({ type: 'application/json' }), handleShopifyCommerceWebhook('fulfillments/create'));
+app.post('/api/shopify/webhooks/fulfillments-update', express.raw({ type: 'application/json' }), handleShopifyCommerceWebhook('fulfillments/update'));
+
 app.post('/api/shopify/webhooks/app-uninstalled', express.raw({ type: 'application/json' }), async (req, res) => {
   if (!db || !process.env.SHOPIFY_API_SECRET) return res.sendStatus(503);
   const digest = crypto.createHmac('sha256', process.env.SHOPIFY_API_SECRET).update(req.body).digest('base64');
@@ -161,16 +268,25 @@ app.post('/api/shopify/webhooks/app-uninstalled', express.raw({ type: 'applicati
   const shop = normalizeShop(req.headers['x-shopify-shop-domain']);
   if (shop) {
     const now = new Date();
-    await db.collection('merchants').updateOne({ shop }, { $set: { shopifyConnected: false, uninstalledAt: now, updatedAt: now }, $unset: { shopifyAccessToken: '', shopifyScopes: '' } });
+    await db.collection('merchants').updateOne({ shop }, { $set: { shopifyConnected: false, uninstalledAt: now, updatedAt: now, 'automation.abandonedCartEnabled': false }, $unset: { shopifyAccessToken: '', shopifyScopes: '' } });
   }
   res.sendStatus(200);
 });
 
 app.use(express.json({ limit: '100kb' }));
-app.use((req, res, next) => { res.set('Access-Control-Allow-Origin', process.env.FRONTEND_URL || '*'); res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Merchant-Session, X-Admin-Key'); res.set('Access-Control-Allow-Methods', 'GET,POST,PUT,OPTIONS'); req.method === 'OPTIONS' ? res.sendStatus(204) : next(); });
+app.use((req, res, next) => { res.set('Access-Control-Allow-Origin', req.path.startsWith('/api/storefront/') ? '*' : (process.env.FRONTEND_URL || '*')); res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Merchant-Session, X-Admin-Key'); res.set('Access-Control-Allow-Methods', 'GET,POST,PUT,OPTIONS'); req.method === 'OPTIONS' ? res.sendStatus(204) : next(); });
 
 app.get('/api/health', (req, res) => json(res, 200, { ok: Boolean(db), service: 'zavoka-api' }));
 app.get('/api/plans', (req, res) => json(res, 200, { plans }));
+app.get('/api/storefront/email/unsubscribe', requireDb, async (req, res) => {
+  const token = String(req.query.token || '');
+  if (!/^[a-f0-9]{48}$/i.test(token)) return res.status(400).send('Invalid unsubscribe link.');
+  const cart = await db.collection('abandoned_carts').findOne({ unsubscribeToken: token });
+  if (!cart?.emailHash) return res.status(404).send('This unsubscribe link is no longer available.');
+  await db.collection('email_suppressions').updateOne({ merchantId: cart.merchantId, emailHash: cart.emailHash }, { $set: { merchantId: cart.merchantId, emailHash: cart.emailHash, createdAt: new Date(), source: 'cart_email_unsubscribe' } }, { upsert: true });
+  await db.collection('abandoned_carts').updateMany({ merchantId: cart.merchantId, emailHash: cart.emailHash, status: { $in: ['pending', 'processing'] } }, { $set: { status: 'not_eligible', emailOptOut: true, updatedAt: new Date() }, $unset: { processingAt: '' } });
+  res.type('html').send('<!doctype html><html lang="en"><meta charset="utf-8"><title>Unsubscribed</title><body style="font-family:Arial,sans-serif;max-width:600px;margin:60px auto;padding:20px"><h1>You are unsubscribed</h1><p>You will not receive more zavoka cart recovery emails for this store.</p></body></html>');
+});
 app.post('/api/install', requireDb, async (req, res) => {
   const shop = normalizeShop(req.body.shop);
   const email = String(req.body.email || '').trim().toLowerCase();
@@ -184,7 +300,7 @@ app.post('/api/install', requireDb, async (req, res) => {
   const state = crypto.randomBytes(24).toString('hex'); await db.collection('oauth_states').insertOne({ state, shop, merchantId: result._id, createdAt: now, expiresAt: new Date(now.getTime() + 10 * 60000) });
   const session = crypto.randomBytes(32).toString('hex');
   await db.collection('merchant_sessions').insertOne({ session, merchantId: result._id, createdAt: now, expiresAt: new Date(now.getTime() + 7 * 86400000) });
-  const installUrl = `https://${shop}/admin/oauth/authorize?client_id=${encodeURIComponent(process.env.SHOPIFY_API_KEY)}&scope=${encodeURIComponent(process.env.SHOPIFY_SCOPES || 'read_products,write_script_tags')}&redirect_uri=${encodeURIComponent(process.env.SHOPIFY_REDIRECT_URI || 'https://zavoka.com/api/shopify/callback')}&state=${state}`;
+  const installUrl = `https://${shop}/admin/oauth/authorize?client_id=${encodeURIComponent(process.env.SHOPIFY_API_KEY)}&scope=${encodeURIComponent(process.env.SHOPIFY_SCOPES || 'read_products,read_orders,read_checkouts,read_script_tags,write_script_tags')}&redirect_uri=${encodeURIComponent(process.env.SHOPIFY_REDIRECT_URI || 'https://zavoka.com/api/shopify/callback')}&state=${state}`;
   const merchant = result.value || result;
   json(res, 201, { success: true, merchantId: merchant._id.toString(), session, trialPlan, message: 'Your trial is reserved. It starts when Shopify approves the installation.', installUrl });
 });
@@ -207,7 +323,7 @@ app.post('/api/merchant/uninstall', requireDb, requireMerchantSession, async (re
   // Shopify does not allow an app to uninstall itself. This disconnects zavoka,
   // removes stored credentials, and records the request; the merchant can then
   // confirm removal from Shopify Admin > Settings > Apps and sales channels.
-  await db.collection('merchants').updateOne({ _id: merchant._id }, { $set: { shopifyConnected: false, uninstalledAt: now, uninstallRequestedAt: now, updatedAt: now }, $unset: { shopifyAccessToken: '', shopifyScopes: '' } });
+  await db.collection('merchants').updateOne({ _id: merchant._id }, { $set: { shopifyConnected: false, uninstalledAt: now, uninstallRequestedAt: now, updatedAt: now, 'automation.abandonedCartEnabled': false }, $unset: { shopifyAccessToken: '', shopifyScopes: '' } });
   await db.collection('activity_events').insertOne({ merchantId: merchant._id, type: 'uninstall_requested', createdAt: now });
   if (merchant.stripeSubscriptionId && stripe) {
     try {
@@ -262,7 +378,7 @@ app.get('/api/shopify/connect', requireDb, requireMerchantSession, async (req, r
   const now = new Date();
   const state = crypto.randomBytes(24).toString('hex');
   await db.collection('oauth_states').insertOne({ state, shop: merchant.shop, merchantId: merchant._id, createdAt: now, expiresAt: new Date(now.getTime() + 10 * 60000) });
-  const installUrl = `https://${merchant.shop}/admin/oauth/authorize?client_id=${encodeURIComponent(process.env.SHOPIFY_API_KEY)}&scope=${encodeURIComponent(process.env.SHOPIFY_SCOPES || 'read_products,write_script_tags')}&redirect_uri=${encodeURIComponent(process.env.SHOPIFY_REDIRECT_URI)}&state=${state}`;
+  const installUrl = `https://${merchant.shop}/admin/oauth/authorize?client_id=${encodeURIComponent(process.env.SHOPIFY_API_KEY)}&scope=${encodeURIComponent(process.env.SHOPIFY_SCOPES || 'read_products,read_orders,read_checkouts,read_script_tags,write_script_tags')}&redirect_uri=${encodeURIComponent(process.env.SHOPIFY_REDIRECT_URI)}&state=${state}`;
   json(res, 200, { installUrl });
 });
 app.get('/api/shopify/callback', requireDb, async (req, res) => {
@@ -282,11 +398,68 @@ app.get('/api/shopify/callback', requireDb, async (req, res) => {
     await trialEmail({ ...merchant, ...trialFields }, 'Your Premium trial has started', 'Your free Premium trial is now active. No payment is required during the trial.');
     await db.collection('merchants').updateOne({ _id: record.merchantId }, { $set: { trialStartEmailSent: true } });
   }
+  const connectedMerchant = { ...merchant, shop, shopifyAccessToken: token.access_token };
   try {
-    await fetch(`https://${shop}/admin/api/${shopifyApiVersion}/webhooks.json`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token.access_token }, body: JSON.stringify({ webhook: { topic: 'app/uninstalled', address: `${process.env.SHOPIFY_REDIRECT_URI.replace(/\/api\/shopify\/callback$/, '')}/api/shopify/webhooks/app-uninstalled`, format: 'json' } }) });
-  } catch (error) { console.error('Shopify uninstall webhook registration failed:', error.message); }
+    const shopResponse = await fetch(`https://${shop}/admin/api/${shopifyApiVersion}/shop.json`, { headers: { 'X-Shopify-Access-Token': token.access_token } });
+    if (shopResponse.ok) {
+      const shopData = (await shopResponse.json()).shop || {};
+      connectedMerchant.storefrontDomains = [...new Set([shop, shopData.myshopify_domain, shopData.primary_domain].map(normalizeShop).filter(Boolean))];
+      connectedMerchant.shopCurrency = shopData.currency || 'USD';
+      await db.collection('merchants').updateOne({ _id: record.merchantId }, { $set: { storefrontDomains: connectedMerchant.storefrontDomains, shopCurrency: connectedMerchant.shopCurrency } });
+    }
+  } catch (error) { console.error('Shopify storefront domain lookup failed:', error.message); }
+  try { await syncShopProducts(connectedMerchant); } catch (error) { console.error('Initial Shopify product sync failed:', error.message); }
+  const apiBase = String(process.env.SHOPIFY_REDIRECT_URI || '').replace(/\/api\/shopify\/callback$/, '');
+  const webhookTopics = ['app/uninstalled', 'orders/create', 'orders/updated', 'checkouts/create', 'checkouts/update', 'products/create', 'products/update', 'products/delete', 'fulfillments/create', 'fulfillments/update'];
+  for (const topic of webhookTopics) {
+    const endpoint = topic === 'app/uninstalled' ? 'app-uninstalled' : topic.replace('/', '-').replace('updated', 'update');
+    try {
+      const response = await fetch(`https://${shop}/admin/api/${shopifyApiVersion}/webhooks.json`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token.access_token }, body: JSON.stringify({ webhook: { topic, address: `${apiBase}/api/shopify/webhooks/${endpoint}`, format: 'json' } }) });
+      if (!response.ok) console.error(`Shopify ${topic} webhook registration failed:`, response.status, await response.text());
+    } catch (error) { console.error(`Shopify ${topic} webhook registration failed:`, error.message); }
+  }
+  const storefrontScript = `${String(process.env.FRONTEND_URL || 'https://zavoka.com').replace(/\/$/, '')}/js/shopify-storefront.js`;
+  try {
+    const tagsResponse = await fetch(`https://${shop}/admin/api/${shopifyApiVersion}/script_tags.json?limit=250`, { headers: { 'X-Shopify-Access-Token': token.access_token } });
+    const tags = tagsResponse.ok ? (await tagsResponse.json()).script_tags || [] : [];
+    if (!tags.some((tag) => tag.src === storefrontScript)) {
+      const response = await fetch(`https://${shop}/admin/api/${shopifyApiVersion}/script_tags.json`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token.access_token }, body: JSON.stringify({ script_tag: { event: 'onload', src: storefrontScript, display_scope: 'online_store' } }) });
+      if (!response.ok) console.error('Shopify storefront widget installation failed:', response.status, await response.text());
+    }
+  } catch (error) { console.error('Shopify storefront widget installation failed:', error.message); }
   await db.collection('oauth_states').deleteOne({ _id: record._id });
   res.redirect(`${process.env.FRONTEND_URL || '/'}/dashboard.html?shopify=connected&merchantId=${record.merchantId}`);
+});
+app.get('/api/storefront/products', requireDb, async (req, res) => {
+  const storefrontDomain = normalizeShop(req.query.shop);
+  if (!storefrontDomain) return json(res, 400, { error: 'A valid Shopify store domain is required.' });
+  const merchant = await db.collection('merchants').findOne({ $or: [{ shop: storefrontDomain }, { storefrontDomains: storefrontDomain }], shopifyConnected: true });
+  if (!merchant) return json(res, 404, { error: 'This Shopify store is not connected.' });
+  const products = await db.collection('shop_products').find({ shop: merchant.shop, status: 'active', 'variants.0': { $exists: true } }).sort({ syncedAt: -1 }).limit(100).toArray();
+  await db.collection('activity_events').insertOne({ merchantId: merchant._id, type: 'recommendation', itemCount: products.length, createdAt: new Date() });
+  json(res, 200, { storefrontDomain, currency: merchant.shopCurrency || 'USD', products: products.map(({ productId, title, productUrl, image, variants }) => ({ productId, title, productUrl, image, variants })) });
+});
+app.post('/api/storefront/checkout', requireDb, async (req, res) => {
+  const storefrontDomain = normalizeShop(req.body.shop);
+  const items = Array.isArray(req.body.items) ? req.body.items.slice(0, 10) : [];
+  if (!storefrontDomain || !items.length) return json(res, 400, { error: 'Choose at least one product for checkout.' });
+  const merchant = await db.collection('merchants').findOne({ $or: [{ shop: storefrontDomain }, { storefrontDomains: storefrontDomain }], shopifyConnected: true });
+  if (!merchant) return json(res, 404, { error: 'This Shopify store is not connected.' });
+  const variantIds = items.map((item) => String(item.variantId || ''));
+  if (variantIds.some((id) => !/^\d+$/.test(id))) return json(res, 400, { error: 'A valid Shopify product variant is required.' });
+  const catalog = await db.collection('shop_products').find({ shop: merchant.shop, 'variants.id': { $in: variantIds }, status: 'active' }).toArray();
+  const available = new Map(catalog.flatMap((product) => product.variants.filter((variant) => variantIds.includes(variant.id) && variant.available).map((variant) => [variant.id, variant])));
+  const cartLines = [];
+  for (const item of items) {
+    const variantId = String(item.variantId);
+    const variant = available.get(variantId);
+    const quantity = Math.max(1, Math.min(10, Math.floor(Number(item.quantity) || 1)));
+    if (!variant) return json(res, 400, { error: 'One of the selected products is unavailable. Refresh the product catalog and try again.' });
+    cartLines.push(`${encodeURIComponent(variantId)}:${quantity}`);
+  }
+  const checkoutUrl = `https://${storefrontDomain}/cart/${cartLines.join(',')}?checkout`;
+  await db.collection('activity_events').insertOne({ merchantId: merchant._id, type: 'checkout_started', itemCount: cartLines.length, createdAt: new Date() });
+  json(res, 200, { success: true, checkoutUrl });
 });
 app.post('/api/checkout', requireDb, async (req, res) => {
   const plan = plans[req.body.plan]; const shop = normalizeShop(req.body.shop); const email = String(req.body.email || '').trim().toLowerCase();
@@ -311,6 +484,26 @@ app.post('/api/checkout', requireDb, async (req, res) => {
   }
 });
 
+app.get('/api/merchant/automation', requireDb, requireMerchantSession, async (req, res) => {
+  const merchant = await db.collection('merchants').findOne({ _id: req.merchantId });
+  if (!merchant) return json(res, 404, { error: 'Merchant not found.' });
+  json(res, 200, { automation: { abandonedCartEnabled: merchant.automation?.abandonedCartEnabled === true, abandonedCartDelayMinutes: Number(merchant.automation?.abandonedCartDelayMinutes) || 60 }, emailConfigured: Boolean(process.env.RESEND_API_KEY), shopifyConnected: merchant.shopifyConnected === true });
+});
+app.put('/api/merchant/automation', requireDb, requireMerchantSession, async (req, res) => {
+  const enabled = req.body.abandonedCartEnabled === true;
+  const delay = Math.min(1440, Math.max(15, Math.floor(Number(req.body.abandonedCartDelayMinutes) || 60)));
+  const merchant = await db.collection('merchants').findOne({ _id: req.merchantId });
+  if (!merchant) return json(res, 404, { error: 'Merchant not found.' });
+  if (enabled && !merchant.shopifyConnected) return json(res, 400, { error: 'Connect Shopify before enabling cart recovery.' });
+  if (enabled && !process.env.RESEND_API_KEY) return json(res, 400, { error: 'Email delivery is not configured on the server yet.' });
+  await db.collection('merchants').updateOne({ _id: merchant._id }, { $set: { automation: { abandonedCartEnabled: enabled, abandonedCartDelayMinutes: delay }, updatedAt: new Date() } });
+  if (enabled) {
+    const dueAt = new Date(Date.now() + delay * 60000);
+    await db.collection('abandoned_carts').updateMany({ merchantId: merchant._id, status: 'pending' }, { $set: { dueAt, updatedAt: new Date() } });
+    await db.collection('abandoned_carts').updateMany({ merchantId: merchant._id, status: 'not_eligible', emailConsented: true, emailOptOut: { $ne: true }, email: { $ne: '' } }, { $set: { status: 'pending', dueAt, updatedAt: new Date() } });
+  }
+  json(res, 200, { success: true, automation: { abandonedCartEnabled: enabled, abandonedCartDelayMinutes: delay } });
+});
 app.put('/api/merchant/autopay', requireDb, requireMerchantSession, async (req, res) => {
   const id = String(req.body.merchantId || '');
   const enabled = req.body.enabled === true;
@@ -426,13 +619,48 @@ app.put('/api/admin/merchants/:merchantId/chat-limit', requireDb, requireAdmin, 
 });
 app.get('/api/dashboard', requireDb, requireMerchantSession, async (req, res) => {
   const merchantId = req.merchantId;
-  const [conversations, activity] = await Promise.all([
+  const merchant = await db.collection('merchants').findOne({ _id: merchantId });
+  const [conversations, recommendations, checkouts, ordersCount, recoveredCarts, pendingCarts, orderTotals, orders] = await Promise.all([
     db.collection('activity_events').countDocuments({ merchantId, type: 'chat' }),
-    db.collection('activity_events').countDocuments({ merchantId, type: 'recommendation' })
+    db.collection('activity_events').countDocuments({ merchantId, type: 'recommendation' }),
+    db.collection('shopify_checkouts').countDocuments({ merchantId }),
+    db.collection('shopify_orders').countDocuments({ merchantId }),
+    db.collection('abandoned_carts').countDocuments({ merchantId, status: 'recovered' }),
+    db.collection('abandoned_carts').countDocuments({ merchantId, status: { $in: ['pending', 'processing', 'sent'] } }),
+    db.collection('shopify_orders').aggregate([{ $match: { merchantId } }, { $group: { _id: null, revenue: { $sum: '$total' } } }]).toArray(),
+    db.collection('shopify_orders').find({ merchantId }, { projection: { orderNumber: 1, financialStatus: 1, fulfillmentStatus: 1, total: 1, currency: 1, orderStatusUrl: 1, tracking: 1, createdAt: 1 } }).sort({ createdAt: -1 }).limit(20).toArray()
   ]);
-  json(res, 200, { metrics: { conversations, recommendedProducts: activity, cartRecovery: 0, conversionRate: '0%' }, recentActivity: [] });
+  const conversionRate = checkouts ? `${((ordersCount / checkouts) * 100).toFixed(1)}%` : '0%';
+  json(res, 200, { metrics: { conversations, recommendedProducts: recommendations, cartRecovery: recoveredCarts, conversionRate, orders: ordersCount, revenue: Number(orderTotals[0]?.revenue || 0), currency: merchant.shopCurrency || 'USD', pendingCarts }, orders, recentActivity: [] });
 });
 app.use((req, res) => json(res, 404, { error: 'Route not found' }));
 
-async function start() { await mongo.connect(); db = mongo.db(process.env.MONGODB_DB || 'zavoka'); await Promise.all([db.collection('merchants').createIndex({ shop: 1 }, { unique: true, sparse: true }), db.collection('oauth_states').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 })]); await Promise.all([db.collection('platform_settings').updateOne({ _id: 'trial', chatLimit: 100 }, { $set: { chatLimit: 50, updatedAt: new Date() } }), db.collection('merchants').updateMany({ trialStatus: 'active', trialChatLimit: 100 }, { $set: { trialChatLimit: 50, updatedAt: new Date() } })]); setInterval(() => processTrialNotifications().catch((error) => console.error('Trial notification job failed:', error.message)), 15 * 60 * 1000); await processTrialNotifications(); app.listen(port, () => console.log(`zavoka API listening on ${port}`)); }
+async function start() {
+  await mongo.connect();
+  db = mongo.db(process.env.MONGODB_DB || 'zavoka');
+  await Promise.all([
+    db.collection('merchants').createIndex({ shop: 1 }, { unique: true, sparse: true }),
+    db.collection('oauth_states').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
+    db.collection('shopify_orders').createIndex({ shop: 1, orderId: 1 }, { unique: true }),
+    db.collection('shopify_checkouts').createIndex({ shop: 1, checkoutId: 1 }, { unique: true }),
+    db.collection('abandoned_carts').createIndex({ shop: 1, checkoutId: 1 }, { unique: true }),
+    db.collection('abandoned_carts').createIndex({ status: 1, dueAt: 1 }),
+    db.collection('shopify_webhook_events').createIndex({ deliveryId: 1 }, { unique: true, sparse: true }),
+    db.collection('shop_products').createIndex({ shop: 1, productId: 1 }, { unique: true }),
+    db.collection('email_suppressions').createIndex({ merchantId: 1, emailHash: 1 }, { unique: true })
+  ]);
+  await Promise.all([db.collection('platform_settings').updateOne({ _id: 'trial', chatLimit: 100 }, { $set: { chatLimit: 50, updatedAt: new Date() } }), db.collection('merchants').updateMany({ trialStatus: 'active', trialChatLimit: 100 }, { $set: { trialChatLimit: 50, updatedAt: new Date() } })]);
+  setInterval(() => processTrialNotifications().catch((error) => console.error('Trial notification job failed:', error.message)), 15 * 60 * 1000);
+  setInterval(() => processAbandonedCartJobs().catch((error) => console.error('Abandoned-cart job failed:', error.message)), 5 * 60 * 1000);
+  setInterval(async () => {
+    try {
+      const merchants = await db.collection('merchants').find({ shopifyConnected: true, shopifyAccessToken: { $exists: true } }).toArray();
+      for (const merchant of merchants) {
+        try { await syncShopProducts(merchant); } catch (error) { console.error(`Product sync failed for ${merchant.shop}:`, error.message); }
+      }
+    } catch (error) { console.error('Shopify product sync job failed:', error.message); }
+  }, 6 * 60 * 60 * 1000);
+  await Promise.all([processTrialNotifications(), processAbandonedCartJobs()]);
+  app.listen(port, () => console.log(`zavoka API listening on ${port}`));
+}
 start().catch((error) => { console.error('Startup failed:', error); process.exit(1); });
