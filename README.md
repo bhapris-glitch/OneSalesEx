@@ -19,12 +19,14 @@ layboka-ai/
 ├── robots.txt                  # Crawler rules and sitemap reference
 ├── sitemap.xml                 # Public SEO URLs
 ├── css/style.css               # Shared theme and responsive layout
+├── css/storefront-widget.css   # Isolated Shopify storefront widget styles
 ├── js/app.js                   # Navigation, calculator, trial, and checkout logic
 ├── js/chatbot.js               # Storefront AI chat widget
-├── js/dashboard.js             # Merchant settings and billing logic
+├── js/shopify-storefront.js    # Shopify script-tag loader
+├── js/dashboard.js             # Merchant settings, orders, analytics, and automation
 ├── js/enterprise.js            # Enterprise consultation form logic
 └── backend/
-    ├── server.js               # Express API, Shopify OAuth, Stripe, and chat routes
+    ├── server.js               # Express API, Shopify webhooks, commerce data, and cron jobs
     ├── package.json             # Backend dependencies
     └── .env.example             # Production environment variable template
 ```
@@ -127,17 +129,43 @@ Required Shopify variables:
 ```env
 SHOPIFY_API_KEY=...
 SHOPIFY_API_SECRET=...
-SHOPIFY_SCOPES=read_products,write_script_tags
+SHOPIFY_SCOPES=read_products,read_orders,read_checkouts,read_script_tags,write_script_tags
+SHOPIFY_API_VERSION=2025-01
 SHOPIFY_REDIRECT_URI=https://api.your-domain.com/api/shopify/callback
 ```
 
-The installation form validates a store domain, creates a 5-day Premium trial with 100 AI chats, and redirects the merchant to Shopify OAuth. The callback validates the OAuth state and Shopify HMAC before storing the access token.
+The installation form validates a store domain, creates a 5-day Premium trial with 50 AI chats, and redirects the merchant to Shopify OAuth. The callback validates the OAuth state and Shopify HMAC before storing the access token. It also syncs the initial product catalog, registers Shopify order/checkout/uninstall webhooks, and installs the storefront widget script.
+
+## Shopify checkout, orders, and email automation
+
+The Shopify OAuth scopes must include `read_products`, `read_orders`, `read_checkouts`, `read_script_tags`, and `write_script_tags`. Merchants must reconnect after changing scopes. Verify the app's access to order and checkout data in Shopify before enabling production automations.
+
+On an authorized install, the API registers these signed webhook routes:
+
+- `POST /api/shopify/webhooks/orders-create`
+- `POST /api/shopify/webhooks/orders-update`
+- `POST /api/shopify/webhooks/checkouts-create`
+- `POST /api/shopify/webhooks/checkouts-update`
+- `POST /api/shopify/webhooks/products-create`
+- `POST /api/shopify/webhooks/products-update`
+- `POST /api/shopify/webhooks/products-delete`
+- `POST /api/shopify/webhooks/fulfillments-create`
+- `POST /api/shopify/webhooks/fulfillments-update`
+- `POST /api/shopify/webhooks/app-uninstalled`
+
+Order webhooks maintain fulfillment and order-status links for the merchant dashboard. Checkout webhooks maintain cart records. The dashboard lets a merchant enable a single recovery email and select a delay; a recovery job is queued only when Shopify checkout data records explicit marketing consent. The job rechecks consent, app connection, automation state, and an email suppression list before sending; each message includes an unsubscribe link. Email is sent through Resend (`RESEND_API_KEY` and `FROM_EMAIL`). Failed deliveries retry hourly up to five attempts. Disable the automation in the dashboard to stop pending sends.
+
+The backend's in-process scheduled jobs check due recovery emails every five minutes, trial notifications every 15 minutes, and refresh the Shopify catalog every six hours. Keep at least one backend instance running; multiple instances are safe for cart jobs because each task is atomically claimed in MongoDB. Shopify webhook delivery IDs, order IDs, and checkout IDs have database indexes for deduplication and efficient reads.
+
+The storefront widget is installed as a Shopify script tag and requests the catalog from `GET /api/storefront/products?shop={store-domain}`. Its checkout buttons submit Shopify variant IDs to `POST /api/storefront/checkout`; the backend verifies every selected variant against its synchronized catalog and returns a Shopify cart/checkout URL. Set `FRONTEND_URL` to the public host serving the widget assets and API rewrite. Product sync initially imports up to 250 active products per store; larger catalogs may require pagination support.
+
+Dashboard analytics use Shopify order webhooks and checkout actions to show tracked order totals, checkout conversion, revenue, and recovered carts. Order status and tracking links are visible under **Order tracking**.
 
 ## Trial and access rules
 
 - Trial length: 5 days.
 - Trial plan: Premium features.
-- Trial allowance: 100 AI chats.
+- Trial allowance: 50 AI chats.
 - A trial ends when the time limit or chat limit is reached.
 - Paid access requires an active or trialing subscription and a stored Stripe subscription ID.
 - Trial and billing notifications are optional and require Resend configuration.
@@ -202,8 +230,12 @@ The backend provides:
 - `GET /api/plans`
 - `POST /api/install`
 - `GET /api/shopify/callback`
+- `GET /api/storefront/products`
+- `POST /api/storefront/checkout`
 - `POST /api/checkout`
 - `POST /api/stripe/webhook`
+- Shopify order, checkout, and uninstall webhooks listed above
+- `GET` / `PUT /api/merchant/automation`
 - `GET /api/merchant/settings`
 - `PUT /api/merchant/settings`
 - `GET /api/merchant/billing`
@@ -219,5 +251,5 @@ The backend provides:
 - Use the live Stripe webhook signing secret with live payments.
 - Restrict admin metrics with authentication before exposing `admin.html` publicly.
 - Review Shopify scopes and request only the permissions required by the application.
-- Configure production CORS to the actual frontend origin instead of relying on a wildcard.
+- Configure production CORS to the actual frontend origin; only the public, credential-free Shopify storefront routes allow wildcard origins.
 - Review privacy, terms, billing, cancellation, and data-retention language before public launch.
