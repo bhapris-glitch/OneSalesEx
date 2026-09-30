@@ -11,15 +11,15 @@ if (missing.length) console.warn(`Missing production environment variables: ${mi
 const app = express();
 const port = Number(process.env.PORT || 8080);
 const plans = {
-  starter: { name: 'Starter', price: 25, stripePriceId: process.env.STRIPE_STARTER_PRICE_ID, model: 'gpt-4o-mini' },
-  growth: { name: 'Growth', price: 59, stripePriceId: process.env.STRIPE_GROWTH_PRICE_ID, model: 'gpt-4o-mini' },
-  premium: { name: 'Premium', price: 149, stripePriceId: process.env.STRIPE_PREMIUM_PRICE_ID, model: process.env.OPENAI_PREMIUM_MODEL || 'gpt-5' }
+  starter: { name: 'Starter', price: 25, chatLimit: 500, stripePriceId: process.env.STRIPE_STARTER_PRICE_ID, model: 'gpt-4o-mini' },
+  growth: { name: 'Growth', price: 59, chatLimit: 1200, stripePriceId: process.env.STRIPE_GROWTH_PRICE_ID, model: 'gpt-4o-mini' },
+  premium: { name: 'Premium', price: 149, chatLimit: 2300, stripePriceId: process.env.STRIPE_PREMIUM_PRICE_ID, model: process.env.OPENAI_PREMIUM_MODEL || 'gpt-5' }
 };
 const isRealConfigValue = (value, prefix) => Boolean(value && value.startsWith(prefix) && !value.includes('replace_me'));
 const stripe = isRealConfigValue(process.env.STRIPE_SECRET_KEY, 'sk_') ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
-const chatLimits = { starter: 600, growth: 1400, premium: 2300, enterprise: Number.MAX_SAFE_INTEGER };
+const chatLimits = { starter: 500, growth: 1200, premium: 2300, enterprise: Number.MAX_SAFE_INTEGER };
 const trialPlan = 'premium';
-const defaultTrialSettings = { days: 5, chatLimit: 100 };
+const defaultTrialSettings = { days: 5, chatLimit: 50 };
 const shopifyApiVersion = process.env.SHOPIFY_API_VERSION || '2025-01';
 const adminKey = String(process.env.ADMIN_API_KEY || '');
 const getTrialSettings = async () => { if (!db) return defaultTrialSettings; const saved = await db.collection('platform_settings').findOne({ _id: 'trial' }); return { days: Number(saved?.days) || defaultTrialSettings.days, chatLimit: Number(saved?.chatLimit) || defaultTrialSettings.chatLimit }; };
@@ -29,23 +29,11 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 const isTrialActive = (merchant) => merchant?.trialStatus === 'active' && merchant.trialEndsAt && new Date(merchant.trialEndsAt) > new Date();
+const getMerchantChatLimit = (merchant) => Number.isInteger(merchant?.chatLimitOverride) ? merchant.chatLimitOverride : (isTrialActive(merchant) ? (Number(merchant.trialChatLimit) || defaultTrialSettings.chatLimit) : (chatLimits[merchant?.plan] || chatLimits.starter));
 const isPaid = (merchant) => ['active', 'trialing'].includes(merchant?.subscriptionStatus) && merchant?.stripeSubscriptionId && (!merchant.currentPeriodEnd || new Date(merchant.currentPeriodEnd) > new Date());
 const defaultSettings = { agentName: 'Emily', agentPic: '', storeName: 'zavoka', themeColor: '#FF4616', primaryColor: '#FF4616', chatBackground: '#0D1009', accentColor: '#39D353', behavior: 'Friendly, helpful, concise, and focused on improving sales.', welcomeMessage: 'Hi! I’m Emily. How can I help you shop today?' };
-const mongoUri = String(process.env.MONGODB_URI || '').trim();
-if (!mongoUri) console.warn('MONGODB_URI is not configured; MongoDB startup will fail until it is set.');
-const mongo = mongoUri ? new MongoClient(mongoUri, {
-  serverSelectionTimeoutMS: Number(process.env.MONGODB_SERVER_SELECTION_TIMEOUT_MS || 10000),
-  connectTimeoutMS: Number(process.env.MONGODB_CONNECT_TIMEOUT_MS || 10000),
-  maxPoolSize: Number(process.env.MONGODB_MAX_POOL_SIZE || 20)
-}) : null;
+const mongo = new MongoClient(process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017');
 let db;
-let mongoReady = false;
-
-if (mongo) {
-  mongo.on('serverOpening', () => { mongoReady = true; });
-  mongo.on('serverClosed', () => { mongoReady = false; });
-  mongo.on('topologyClosed', () => { mongoReady = false; });
-}
 
 const json = (res, status, data) => res.status(status).json(data);
 const validEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || ''));
@@ -64,7 +52,7 @@ const normalizeShop = (value) => {
     return null;
   }
 };
-const requireDb = (req, res, next) => db && mongoReady ? next() : json(res, 503, { error: 'Database is not connected.' });
+const requireDb = (req, res, next) => db ? next() : json(res, 503, { error: 'Database is not connected.' });
 const requireMerchantSession = async (req, res, next) => {
   const merchantId = String(req.query.merchantId || req.body?.merchantId || '');
   const session = String(req.headers['x-merchant-session'] || req.query.session || '');
@@ -181,17 +169,7 @@ app.post('/api/shopify/webhooks/app-uninstalled', express.raw({ type: 'applicati
 app.use(express.json({ limit: '100kb' }));
 app.use((req, res, next) => { res.set('Access-Control-Allow-Origin', process.env.FRONTEND_URL || '*'); res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Merchant-Session, X-Admin-Key'); res.set('Access-Control-Allow-Methods', 'GET,POST,PUT,OPTIONS'); req.method === 'OPTIONS' ? res.sendStatus(204) : next(); });
 
-app.get('/api/health', async (req, res) => {
-  if (!db || !mongoReady) return json(res, 503, { ok: false, database: 'disconnected', service: 'zavoka-api' });
-  try {
-    await db.command({ ping: 1 });
-    json(res, 200, { ok: true, database: 'connected', db: db.databaseName, service: 'zavoka-api' });
-  } catch (error) {
-    mongoReady = false;
-    console.error('MongoDB health check failed:', error.message);
-    json(res, 503, { ok: false, database: 'disconnected', service: 'zavoka-api' });
-  }
-});
+app.get('/api/health', (req, res) => json(res, 200, { ok: Boolean(db), service: 'zavoka-api' }));
 app.get('/api/plans', (req, res) => json(res, 200, { plans }));
 app.post('/api/install', requireDb, async (req, res) => {
   const shop = normalizeShop(req.body.shop);
@@ -262,7 +240,7 @@ app.get('/api/merchant/settings', requireDb, requireMerchantSession, async (req,
     shopifyConnected: merchant.shopifyConnected === true,
     uninstalledAt: merchant.uninstalledAt || null,
     usage: merchant.chatUsage || 0,
-    limit: trial ? (merchant.trialChatLimit || defaultTrialSettings.chatLimit) : chatLimits[effectivePlan],
+    limit: getMerchantChatLimit(merchant),
     model: trial || (paid && effectivePlan === 'premium') ? plans.premium.model : (plans[effectivePlan]?.model || 'gpt-4o-mini')
   });
 });
@@ -355,7 +333,7 @@ app.get('/api/merchant/billing', requireDb, requireMerchantSession, async (req, 
   const trial = isTrialActive(merchant);
   const plan = trial ? 'premium' : (merchant.plan || 'starter');
   const paid = isPaid(merchant);
-  const limit = trial ? (merchant.trialChatLimit || defaultTrialSettings.chatLimit) : (chatLimits[plan] || chatLimits.starter);
+  const limit = getMerchantChatLimit(merchant);
   const usage = merchant.chatUsageMonth === new Date().toISOString().slice(0, 7) ? (merchant.chatUsage || 0) : 0;
   json(res, 200, { plan, planName: plans[plan]?.name || plan, trialActive: trial, trialEndsAt: merchant.trialEndsAt || null, subscriptionStatus: merchant.subscriptionStatus || null, paidAt: merchant.paidAt || null, currentPeriodEnd: merchant.currentPeriodEnd || null, autopay: merchant.autopay !== false, cancelAtPeriodEnd: merchant.cancelAtPeriodEnd === true, email: merchant.email || null, amount: plans[plan]?.price || null, currency: 'USD', stripeCustomerId: merchant.stripeCustomerId || null, stripeSubscriptionId: merchant.stripeSubscriptionId || null, stripeInvoiceId: merchant.stripeInvoiceId || null, model: trial || (paid && plan === 'premium') ? plans.premium.model : (plans[plan]?.model || 'gpt-4o-mini'), usage, limit, chatLocked: (!trial && !paid) || usage >= limit });
 });
@@ -367,14 +345,14 @@ app.post('/api/chat/message', requireDb, requireMerchantSession, async (req, res
     const paid = isPaid(merchant);
     if (!trial && !paid) return json(res, 402, { locked: true, error: 'Your trial has ended. Upgrade to unlock your AI Sales Executive.' });
     const plan = trial ? (merchant?.trialPlan || trialPlan) : (merchant?.plan || 'starter');
-    const limit = trial ? (merchant.trialChatLimit || defaultTrialSettings.chatLimit) : (chatLimits[plan] || chatLimits.starter);
+    const limit = getMerchantChatLimit(merchant);
     const settings = { ...defaultSettings, ...(merchant?.settings || {}) };
     const month = new Date().toISOString().slice(0, 7);
     if (merchant && merchant.chatUsageMonth !== month) await db.collection('merchants').updateOne({ _id: merchant._id }, { $set: { chatUsage: 0, chatUsageMonth: month } });
     const currentUsage = merchant?.chatUsageMonth === month ? (merchant.chatUsage || 0) : 0;
     if (currentUsage >= limit) return json(res, 402, { locked: true, limitReached: true, error: trial ? 'Your trial usage limit has been reached. Upgrade to continue.' : `This plan has reached its ${limit.toLocaleString()} monthly AI conversation limit.` });
     let reply = 'I can help you discover products, compare options, understand pricing, start a 5-day trial, or learn how zavoka AI works. What would you like to know?';
-    const websiteKnowledge = `zavoka AI is an always-on AI Sales Executive for Shopify merchants. It chats with shoppers, recommends products, supports upsells and cross-sells, recovers abandoned carts, matches the merchant’s brand voice, provides live sales insights, and is available around the clock. Merchants can start a Premium trial with full features; there is no charge during the trial and no credit card is required. Installation starts from the Install section: enter a Shopify store URL and working email, then approve Shopify installation. Public monthly plans are Starter at $25/month with 600 AI conversations, Growth at $59/month with 1,400 conversations, and Premium at $149/month with 2,300 conversations. Plans can be canceled anytime. The website has Features, Pricing, Enterprise, About Us, Contact Us, Terms, Privacy, Merchant Login, and Install pages. zavoka should never claim a specific product, inventory item, discount, shipping time, refund policy, or store policy unless that information has been supplied by the connected merchant. For account, billing, Shopify installation, or support questions, direct the visitor to the relevant website page or Contact Us.`;
+    const websiteKnowledge = `zavoka AI is an always-on AI Sales Executive for Shopify merchants. It chats with shoppers, recommends products, supports upsells and cross-sells, recovers abandoned carts, matches the merchant’s brand voice, provides live sales insights, and is available around the clock. Merchants can start a Premium trial with full features; there is no charge during the trial and no credit card is required. Installation starts from the Install section: enter a Shopify store URL and working email, then approve Shopify installation. Public monthly plans are Starter at $25/month with 500 AI conversations, Growth at $59/month with 1,200 conversations, and Premium at $149/month with 2,300 conversations. Plans can be canceled anytime. The website has Features, Pricing, Enterprise, About Us, Contact Us, Terms, Privacy, Merchant Login, and Install pages. zavoka should never claim a specific product, inventory item, discount, shipping time, refund policy, or store policy unless that information has been supplied by the connected merchant. For account, billing, Shopify installation, or support questions, direct the visitor to the relevant website page or Contact Us.`;
     if (process.env.OPENAI_API_KEY) {
       const response = await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` }, body: JSON.stringify({ model: trial || plan === 'premium' ? plans.premium.model : (plans[plan]?.model || 'gpt-4o-mini'), temperature: 0.25, max_tokens: 450, messages: [{ role: 'system', content: `You are ${settings.agentName}, the helpful zavoka AI website assistant for ${settings.storeName}. ${settings.behavior} Answer accurately using the following official website information:\n${websiteKnowledge}\nAnswer the visitor directly and concisely. If the question is about a merchant's actual products, explain that product catalog access must be connected and do not invent details.` }, { role: 'user', content: String(req.body.message || '').slice(0, 2000) }] }) });
       if (response.ok) { const data = await response.json(); reply = data.choices?.[0]?.message?.content?.trim() || reply; }
@@ -395,6 +373,18 @@ app.post('/api/enterprise', requireDb, async (req, res) => {
     await sendEmail({ to: process.env.NOTIFICATION_EMAIL, subject: `New Enterprise lead — ${lead.company}`, html: emailLayout('New Enterprise lead', `<p>A new Enterprise inquiry was submitted.</p><table cellpadding="8"><tr><td><b>Name</b></td><td>${lead.name}</td></tr><tr><td><b>Company</b></td><td>${lead.company}</td></tr><tr><td><b>Email</b></td><td>${lead.email}</td></tr><tr><td><b>Store</b></td><td>${lead.shop}</td></tr><tr><td><b>Needs</b></td><td>${lead.needs}</td></tr></table>`) });
   }
   json(res, 201, { success: true, message: 'Thanks — our enterprise team will contact you within 24 hours.' });
+});
+app.post('/api/contact', async (req, res) => {
+  const name = String(req.body.name || '').trim().slice(0, 120);
+  const email = String(req.body.email || '').trim().toLowerCase().slice(0, 254);
+  const subject = String(req.body.subject || '').replace(/[\r\n]+/g, ' ').trim().slice(0, 160);
+  const message = String(req.body.message || '').trim().slice(0, 5000);
+  if (!name || !validEmail(email) || !subject || !message) return json(res, 400, { error: 'Please complete every field with a valid email address.' });
+  const escapeHtml = (value) => value.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
+  const content = `<p><b>From:</b> ${escapeHtml(name)} (${escapeHtml(email)})</p><p><b>Subject:</b> ${escapeHtml(subject)}</p><p>${escapeHtml(message).replace(/\n/g, '<br>')}</p>`;
+  const sent = await sendEmail({ to: 'contact@zavoka.com', subject: `Website contact — ${subject}`, html: emailLayout('New website contact message', content) });
+  if (!sent) return json(res, 503, { error: 'Email delivery is temporarily unavailable. Please try again later.' });
+  json(res, 200, { success: true, message: 'Thanks — your message has been sent to our team.' });
 });
 app.get('/api/admin/trial-settings', requireDb, requireAdmin, async (req, res) => {
   const settings = await getTrialSettings();
@@ -418,6 +408,22 @@ app.get('/api/admin/metrics', requireDb, requireAdmin, async (req, res) => {
   const revenue = await db.collection('merchants').aggregate([{ $match: { subscriptionStatus: { $in: ['active', 'trialing'] } } }, { $group: { _id: null, total: { $sum: { $ifNull: ['$monthlyRevenue', 0] } } } }]).toArray();
   json(res, 200, { metrics: { merchants, activeTrials, conversations, paidMerchants, uninstalledMerchants, monthlyRevenue: revenue[0]?.total || 0 }, charts: { conversations: [], conversions: [], subscriptions: [] }, recentActivity });
 });
+app.get('/api/admin/merchants', requireDb, requireAdmin, async (req, res) => {
+  const search = String(req.query.search || '').trim().slice(0, 120);
+  const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const filter = search ? { $or: [{ shop: { $regex: escaped, $options: 'i' } }, { email: { $regex: escaped, $options: 'i' } }] } : {};
+  const merchants = await db.collection('merchants').find(filter, { projection: { shop: 1, email: 1, plan: 1, trialStatus: 1, trialStartedAt: 1, trialEndsAt: 1, trialChatLimit: 1, chatLimitOverride: 1, chatUsage: 1, subscriptionStatus: 1, paidAt: 1, currentPeriodEnd: 1, shopifyConnected: 1, uninstalledAt: 1, updatedAt: 1 } }).sort({ updatedAt: -1 }).limit(100).toArray();
+  json(res, 200, { merchants: merchants.map((merchant) => ({ ...merchant, merchantId: merchant._id.toString(), chatLimit: getMerchantChatLimit(merchant) })) });
+});
+app.put('/api/admin/merchants/:merchantId/chat-limit', requireDb, requireAdmin, async (req, res) => {
+  const { merchantId } = req.params;
+  const chatLimit = Number(req.body.chatLimit);
+  if (!ObjectId.isValid(merchantId)) return json(res, 400, { error: 'A valid merchantId is required.' });
+  if (!Number.isInteger(chatLimit) || chatLimit < 1 || chatLimit > 100000) return json(res, 400, { error: 'Conversation limit must be a whole number between 1 and 100,000.' });
+  const result = await db.collection('merchants').updateOne({ _id: new ObjectId(merchantId) }, { $set: { chatLimitOverride: chatLimit, updatedAt: new Date() } });
+  if (!result.matchedCount) return json(res, 404, { error: 'Merchant not found.' });
+  json(res, 200, { success: true, chatLimit });
+});
 app.get('/api/dashboard', requireDb, requireMerchantSession, async (req, res) => {
   const merchantId = req.merchantId;
   const [conversations, activity] = await Promise.all([
@@ -428,19 +434,5 @@ app.get('/api/dashboard', requireDb, requireMerchantSession, async (req, res) =>
 });
 app.use((req, res) => json(res, 404, { error: 'Route not found' }));
 
-async function start() {
-  if (!mongo) throw new Error('MONGODB_URI is not configured. Set it to the MongoDB Atlas connection string.');
-  await mongo.connect();
-  db = mongo.db(process.env.MONGODB_DB || 'zavoka_db');
-  await db.command({ ping: 1 });
-  mongoReady = true;
-  await Promise.all([
-    db.collection('merchants').createIndex({ shop: 1 }, { unique: true, sparse: true }),
-    db.collection('oauth_states').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 })
-  ]);
-  console.log(`MongoDB connected: ${db.databaseName}`);
-  setInterval(() => processTrialNotifications().catch((error) => console.error('Trial notification job failed:', error.message)), 15 * 60 * 1000);
-  await processTrialNotifications();
-  app.listen(port, () => console.log(`zavoka API listening on ${port}`));
-}
+async function start() { await mongo.connect(); db = mongo.db(process.env.MONGODB_DB || 'zavoka'); await Promise.all([db.collection('merchants').createIndex({ shop: 1 }, { unique: true, sparse: true }), db.collection('oauth_states').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 })]); await Promise.all([db.collection('platform_settings').updateOne({ _id: 'trial', chatLimit: 100 }, { $set: { chatLimit: 50, updatedAt: new Date() } }), db.collection('merchants').updateMany({ trialStatus: 'active', trialChatLimit: 100 }, { $set: { trialChatLimit: 50, updatedAt: new Date() } })]); setInterval(() => processTrialNotifications().catch((error) => console.error('Trial notification job failed:', error.message)), 15 * 60 * 1000); await processTrialNotifications(); app.listen(port, () => console.log(`zavoka API listening on ${port}`)); }
 start().catch((error) => { console.error('Startup failed:', error); process.exit(1); });
