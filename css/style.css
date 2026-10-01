@@ -427,4 +427,9 @@ main h1,main h2,main h3,main h4,main h5,main h6{letter-spacing:.35px}
 .lb-product-card button{grid-column:1/-1;width:100%;padding:9px;border:1px solid #b7e33f;border-radius:7px;background:linear-gradient(110deg,#f7e84a,#a9ee47);color:#111;font-size:11px;font-weight:700;cursor:pointer}
 .lb-product-card button:disabled{opacity:.65;cursor:wait}
 .analytics-list{grid-template-columns:repeat(3,1fr)}
+.sales-conversation-list{display:grid;gap:8px;margin:12px 0 28px}
+.sales-conversation-list details{padding:13px 15px;border:1px solid var(--line);border-radius:10px;background:#f2f5f3}
+.sales-conversation-list summary{cursor:pointer;font-weight:700}
+.sales-conversation-list p{margin:8px 0 0;color:#41464a;font-size:12px;overflow-wrap:anywhere}
+#tab-analytics h3{margin-top:28px}
 @media(max-width:600px){.analytics-list{grid-template-columns:1fr 1fr}}
