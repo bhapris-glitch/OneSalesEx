@@ -402,10 +402,12 @@ main h1,main h2,main h3,main h4,main h5,main h6{letter-spacing:.35px}
 .menu-toggle:focus-visible{color:var(--orange)}
 
 .contact-section{padding-top:75px;padding-bottom:90px}
-.contact-form{width:min(100%,700px);margin:35px 0 0;padding:28px;background:#f2f5f3;border:1px solid #c9cdd1;border-radius:16px}
-.contact-form label{display:block;margin:16px 0;color:#45494d;font-size:13px;font-weight:600}
-.contact-form input,.contact-form textarea{display:block;width:100%;margin-top:7px;padding:13px;border:1px solid #bfc4c9;border-radius:8px;background:#fff;color:#111;font:inherit}
-.contact-form textarea{min-height:140px;resize:vertical}
+.contact-form{width:100%;margin:35px 0 0;padding:28px;background:#f2f5f3;border:1px solid #c9cdd1;border-radius:16px}
+.contact-form label{display:block;width:100%;margin:16px 0;color:#45494d;font-size:13px;font-weight:600}
+.contact-form input,.contact-form textarea{display:block;width:100%;min-height:50px;margin-top:7px;padding:13px 15px;border:1px solid #bfc4c9;border-radius:12px;background:#fff;color:#111;font:inherit}
+.contact-form textarea{min-height:150px;resize:vertical}
+.contact-form input:focus,.contact-form textarea:focus{outline:2px solid rgba(250,42,85,.35);border-color:#fa2a55}
+.contact-form label span{color:#c91c42}
 .contact-form .form-note{min-height:20px;color:#45494d}
 @media(max-width:800px){.hero h1{letter-spacing:.25px}.cta h2{letter-spacing:1.2px}.contact-section{padding-top:55px}.contact-form{padding:20px}}
 
