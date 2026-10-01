@@ -42,7 +42,7 @@
   const answers=[
     {
       test:/free trial|trial|try.*free|no charge|credit card/i,
-      answer:'The trial gives you 5 days of the full Premium experience and 100 AI chats. There is no charge during the trial and no credit card is required. After 5 days or 100 chats, the assistant pauses until you choose a paid plan.'
+      answer:'The trial gives you 5 days of the full Premium experience and 50 AI chats. There is no charge during the trial and no credit card is required. After 5 days or 50 chats, the assistant pauses until you choose a paid plan.'
     },
     {
       test:/feature|what does|what can|capabilit|recommend|upsell|cross.?sell|cart|brand voice|insight|analytics|24.?7/i,
@@ -50,7 +50,7 @@
     },
     {
       test:/price|pricing|cost|how much|starter|growth|premium|plan|plans|monthly|conversation/i,
-      answer:'Monthly plans are Starter at $25 for 600 AI conversations, Growth at $59 for 1,400 AI conversations, and Premium at $149 for 2,300 AI conversations. Enterprise pricing is custom. Plans are billed monthly and can be canceled anytime.'
+      answer:'Monthly plans are Starter at $25 for 500 AI conversations, Growth at $59 for 1,200 AI conversations, and Premium at $149 for 2,300 AI conversations. Enterprise pricing is custom. Plans are billed monthly and can be canceled anytime.'
     },
     {
       test:/install|installation|setup|shopify|connect|app/i,
