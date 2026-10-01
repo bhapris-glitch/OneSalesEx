@@ -129,7 +129,7 @@ Required Shopify variables:
 ```env
 SHOPIFY_API_KEY=...
 SHOPIFY_API_SECRET=...
-SHOPIFY_SCOPES=read_products,read_orders,read_checkouts,read_script_tags,write_script_tags
+SHOPIFY_SCOPES=read_products,read_orders,read_checkouts,read_content,read_script_tags,write_script_tags
 SHOPIFY_API_VERSION=2025-01
 SHOPIFY_REDIRECT_URI=https://api.your-domain.com/api/shopify/callback
 ```
@@ -138,7 +138,7 @@ The installation form validates a store domain, creates a 5-day Premium trial wi
 
 ## Shopify checkout, orders, and email automation
 
-The Shopify OAuth scopes must include `read_products`, `read_orders`, `read_checkouts`, `read_script_tags`, and `write_script_tags`. Merchants must reconnect after changing scopes. Verify the app's access to order and checkout data in Shopify before enabling production automations.
+The Shopify OAuth scopes must include `read_products`, `read_orders`, `read_checkouts`, `read_content`, `read_script_tags`, and `write_script_tags`. `read_content` is used to sync published store policies. Merchants must reconnect after changing scopes. Verify the app's access to order and checkout data in Shopify before enabling production automations.
 
 On an authorized install, the API registers these signed webhook routes:
 
@@ -157,7 +157,9 @@ Order webhooks maintain fulfillment and order-status links for the merchant dash
 
 The backend's in-process scheduled jobs check due recovery emails every five minutes, trial notifications every 15 minutes, and refresh the Shopify catalog every six hours. Keep at least one backend instance running; multiple instances are safe for cart jobs because each task is atomically claimed in MongoDB. Shopify webhook delivery IDs, order IDs, and checkout IDs have database indexes for deduplication and efficient reads.
 
-The storefront widget is installed as a Shopify script tag and requests the catalog from `GET /api/storefront/products?shop={store-domain}`. Its checkout buttons submit Shopify variant IDs to `POST /api/storefront/checkout`; the backend verifies every selected variant against its synchronized catalog and returns a Shopify cart/checkout URL. Set `FRONTEND_URL` to the public host serving the widget assets and API rewrite. Product sync initially imports up to 250 active products per store; larger catalogs may require pagination support.
+The storefront widget is installed as a Shopify script tag. It loads public branding through `GET /api/storefront/config`, sends shopper turns to `POST /api/storefront/chat`, and uses the synced catalog (titles, descriptions, prices, variants, availability, images, tags, product types, vendors, options, and collections) to filter and rank recommendations against shopper intent, requested colors, and price limits. Product sync paginates Shopify's product, collection, and collect endpoints. Published Shopify policies and relevant published FAQ, shipping, returns, and store-information pages are synced where permissions allow; unpublished pages are excluded. Merchants can add verified business information, shipping, returns, FAQ and approved-discount details, set preferred product IDs, and choose widget position in the dashboard. The assistant must not invent products, prices, inventory, discounts, or policies.
+
+Product cards let shoppers view products, add available variants to the Shopify cart, or proceed to checkout. Add-to-cart and product-click events carry visitor and conversation IDs. Checkout buttons submit Shopify variant IDs to `POST /api/storefront/checkout`; the backend revalidates each available variant, then attaches visitor and conversation identifiers to Shopify cart attributes. Shopify checkout/order webhooks use those attributes (or the saved checkout record) to attribute purchases and revenue to the assistant. Product clicks, checkout starts, conversations, leads, attributed orders, recent conversations, and the synced catalog are available in the merchant dashboard. `POST /api/storefront/lead` stores a shopper email only after explicit follow-up consent. Set `FRONTEND_URL` to the public host serving the widget assets and API rewrite.
 
 Dashboard analytics use Shopify order webhooks and checkout actions to show tracked order totals, checkout conversion, revenue, and recovered carts. Order status and tracking links are visible under **Order tracking**.
 
@@ -179,7 +181,7 @@ FROM_EMAIL=Layboka AI <notifications@layboka.ai>
 
 ## AI chat
 
-The backend supports optional OpenAI integration. Without an OpenAI key, the API returns a safe fallback response.
+The storefront sales agent uses `OPENAI_API_KEY` and `OPENAI_MODEL` for contextual, multi-turn natural-language sales conversations. Without an OpenAI key or if the model is unavailable, it falls back to grounded rule-based product matching, clarifying questions, objection prompts, and verified-policy answers; no products or policy details are invented.
 
 ```env
 OPENAI_API_KEY=sk-proj_...
@@ -230,8 +232,15 @@ The backend provides:
 - `GET /api/plans`
 - `POST /api/install`
 - `GET /api/shopify/callback`
+- `GET /api/storefront/config`
 - `GET /api/storefront/products`
+- `POST /api/storefront/chat`
+- `POST /api/storefront/event`
+- `POST /api/storefront/add-to-cart-event`
+- `GET /api/merchant/v1-event-metrics`
+- `POST /api/storefront/lead`
 - `POST /api/storefront/checkout`
+- `GET /api/merchant/v1-overview`
 - `POST /api/checkout`
 - `POST /api/stripe/webhook`
 - Shopify order, checkout, and uninstall webhooks listed above
