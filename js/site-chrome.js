@@ -62,4 +62,10 @@
       </div>
       <div class="container footer-bottom"><span>© 2026 zavoka AI. All rights reserved.</span><span>Sales conversations, made human.</span></div>`;
   }
+
+  if (window.location.hash === '#merchant-login') {
+    const panel = document.getElementById('merchant-login');
+    panel?.classList.add('open');
+    panel?.setAttribute('aria-hidden', 'false');
+  }
 })();
