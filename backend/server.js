@@ -580,7 +580,14 @@ app.post('/api/storefront/chat', requireDb, async (req, res) => {
     const historyRecord = await db.collection('conversations').findOne({ merchantId: merchant._id, conversationId, visitorId });
     const history = (historyRecord?.messages || []).slice(-12);
     const allProducts = await db.collection('shop_products').find({ shop: merchant.shop, status: 'active', 'variants.0': { $exists: true } }).limit(5000).toArray();
-    const catalogQuery = [...history.filter(item => item.role === 'user').slice(-3).map(item => item.content), message].join(' ');
+    const shopperContext = req.body.shopperContext && typeof req.body.shopperContext === 'object' ? req.body.shopperContext : {};
+    const contextTerms = [
+      String(shopperContext.productTitle || '').slice(0, 120),
+      String(shopperContext.collectionTitle || '').slice(0, 120),
+      ...(Array.isArray(shopperContext.cartItems) && /cart|pair|accessor|goes with|complement|add.?on|recommend/i.test(message) ? shopperContext.cartItems.slice(0, 8).map(item => String(item?.title || '').slice(0, 100)) : []),
+      ...(Array.isArray(shopperContext.preferences) ? shopperContext.preferences.slice(0, 8).map(item => String(item || '').slice(0, 50)) : [])
+    ].filter(Boolean);
+    const catalogQuery = [...history.filter(item => item.role === 'user').slice(-3).map(item => item.content), message, ...contextTerms].join(' ');
     const budgetValue = catalogQuery.match(/(?:under|below|less than|max(?:imum)?|up to)\s*\$?\s*(\d+(?:\.\d+)?)/i)?.[1] || catalogQuery.match(/\$\s*(\d+(?:\.\d+)?)/)?.[1];
     const budgetCeiling = budgetValue ? Number(budgetValue) : Infinity;
     const preferredIds = String(settings.recommendedProductIds || '').split(',').filter(Boolean);
