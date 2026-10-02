@@ -11,7 +11,7 @@
   const merchantSession=localStorage.getItem('lbMerchantSession')||'';
   const root=document.createElement('div');
   root.id='lb-storefront-root';
-  root.innerHTML=`<button class="lb-launcher" aria-label="Open zavoka assistant"><span>✦</span></button><section class="lb-chat" aria-label="Store Sales Executive chat"><header><span class="lb-avatar" id="lbAvatar">♙</span><div class="lb-heading"><strong id="lbTitle">AI Sales Executive</strong><small><span class="lb-online-dot"></span> Online now</small></div><div class="lb-header-actions"><button class="lb-minimize" aria-label="Minimize chat">−</button><button class="lb-close" aria-label="Close chat">×</button></div></header><div class="lb-messages"><p class="lb-assistant" id="lbWelcome">Hi! I’m your AI Sales Executive. What are you shopping for today?</p></div><div class="lb-lead-area"><button type="button" class="lb-lead-toggle">Would you like the store to follow up?</button><form class="lb-lead-form" hidden><input name="name" placeholder="Name (optional)" autocomplete="name" aria-label="Your name"><input name="email" type="email" placeholder="Email address" autocomplete="email" required aria-label="Email address"><label><input name="consent" type="checkbox" required> I agree that this store may contact me about my request.</label><button type="submit">Request follow-up</button><small class="lb-lead-status" role="status"></small></form></div><form class="lb-chat-form"><input placeholder="Ask about products…" autocomplete="off" aria-label="Message the Sales Executive"><button aria-label="Send message">➤</button></form></section>`;
+  root.innerHTML=`<button class="lb-launcher" aria-label="Open zavoka assistant"><span>✦</span></button><section class="lb-chat" aria-label="Store Sales Executive chat"><header><span class="lb-avatar" id="lbAvatar">♙</span><div class="lb-heading"><strong id="lbTitle">AI Sales Executive</strong><small><span class="lb-online-dot"></span> AI · Here to help</small></div><div class="lb-header-actions"><button class="lb-minimize" aria-label="Minimize chat">−</button><button class="lb-close" aria-label="Close chat">×</button></div></header><div class="lb-messages"><p class="lb-assistant" id="lbWelcome">Hi! I’m your AI Sales Executive. What are you shopping for today?</p><div class="lb-quick-replies" aria-label="Quick ways to get help"><button type="button" data-prompt="Help me choose a product" data-guided="true">Help me choose</button><button type="button" data-prompt="What is your shipping policy?">Shipping</button><button type="button" data-prompt="What is your return and exchange policy?">Returns</button><button type="button" data-prompt="How can I track my order?">Track an order</button><button type="button" data-handoff="true">Talk to the store</button></div></div><div class="lb-lead-area"><button type="button" class="lb-lead-toggle">Connect me with the store</button><form class="lb-lead-form" hidden><input name="name" placeholder="Name (optional)" autocomplete="name" aria-label="Your name"><input name="email" type="email" placeholder="Email address" autocomplete="email" required aria-label="Email address"><label><input name="consent" type="checkbox" required> I agree that this store may contact me about my request.</label><button type="submit">Request follow-up</button><small class="lb-lead-status" role="status"></small></form></div><form class="lb-chat-form"><input placeholder="Ask about products…" autocomplete="off" aria-label="Message the Sales Executive"><button aria-label="Send message">➤</button></form></section>`;
   document.body.append(root);
 
   const chat=root.querySelector('.lb-chat');
@@ -28,6 +28,23 @@
   let trialEndsAt=0;
   let countdownMessage=null;
   let countdownTimer=null;
+  const preferenceKey=`lbShopperPreferences_${key}_${conversationId}`;
+  let shopperPreferences=[];
+
+  try{shopperPreferences=JSON.parse(sessionStorage.getItem(preferenceKey)||'[]').filter(value=>typeof value==='string').slice(0,8)}catch{}
+  const rememberPreferences=text=>{
+    const value=String(text||'').toLowerCase();
+    const signals=[...value.matchAll(/\b(black|white|red|blue|green|pink|purple|yellow|orange|brown|beige|gray|grey|navy|small|medium|large|travel|work|everyday|gift|waterproof|lightweight)\b/g)].map(match=>match[1]);
+    const budget=value.match(/(?:under|below|less than|up to|max(?:imum)?)\s*[$£€]?\s*\d+(?:[.,]\d+)?|[$£€]\s*\d+(?:[.,]\d+)?/i);
+    shopperPreferences=[...new Set([...shopperPreferences,...signals,...(budget?[budget[0]]:[])])].slice(-8);
+    try{sessionStorage.setItem(preferenceKey,JSON.stringify(shopperPreferences))}catch{}
+  };
+  const getShopperContext=async()=>{
+    const path=location.pathname.split('?')[0].slice(0,180);
+    const context={pagePath:path,pageTitle:String(document.querySelector('meta[property="og:title"]')?.content||document.title||'').slice(0,120),productTitle:/\/products\//i.test(path)?String(document.querySelector('meta[property="og:title"]')?.content||'').slice(0,120):'',collectionTitle:/\/collections\//i.test(path)?String(document.querySelector('meta[property="og:title"]')?.content||'').slice(0,120):'',cartItems:[],preferences:shopperPreferences};
+    try{const response=await fetch(`${location.origin}/cart.js`,{credentials:'same-origin'});if(response.ok){const cart=await response.json();context.cartItems=(cart.items||[]).slice(0,8).map(item=>({title:String(item.product_title||item.title||'').slice(0,100),quantity:Math.max(1,Number(item.quantity)||1)})).filter(item=>item.title)}}catch{}
+    return context;
+  };
 
   const scroll=()=>{messages.scrollTop=messages.scrollHeight};
   const addMessage=(text,kind='assistant')=>{const p=document.createElement('p');p.className=`lb-${kind}`;p.textContent=text;messages.append(p);scroll();return p};
@@ -37,6 +54,7 @@
   const makeCards=(products,label='')=>{
     if(!products?.length)return;
     if(label){const heading=document.createElement('p');heading.className='lb-product-heading';heading.textContent=label;messages.append(heading)}
+    const note=document.createElement('p');note.className='lb-recommendation-note';note.textContent='Picked from this store’s synced product catalog using your request and shopping context. Check the product page for the latest details.';messages.append(note);
     const grid=document.createElement('div');grid.className='lb-product-grid';
     products.slice(0,3).forEach(product=>{
       const variants=(product.variants||[]).filter(variant=>variant.available!==false);
@@ -45,8 +63,9 @@
       const card=document.createElement('article');card.className='lb-product-card';
       if(product.image){const image=document.createElement('img');image.src=product.image;image.alt='';image.loading='lazy';card.append(image)}
       const title=document.createElement('strong');title.textContent=product.title;card.append(title);
-      const detail=document.createElement('small');detail.className='lb-product-price';detail.textContent=formatPrice(selected.price);card.append(detail);
-      if(variants.length>1){const select=document.createElement('select');select.setAttribute('aria-label',`Choose a variant of ${product.title}`);variants.forEach((variant,index)=>{const option=document.createElement('option');option.value=String(index);option.textContent=`${variant.title} · ${formatPrice(variant.price)}`;select.append(option)});select.addEventListener('change',()=>{selected=variants[Number(select.value)]||variants[0];detail.textContent=formatPrice(selected.price)});card.append(select)}
+      const detail=document.createElement('small');detail.className='lb-product-price';detail.textContent=`${formatPrice(selected.price)} · Available variants`;card.append(detail);
+      const description=String(product.description||'').trim();if(description){const summary=document.createElement('p');summary.className='lb-product-description';summary.textContent=description.length>150?`${description.slice(0,147)}…`:description;card.append(summary)}
+      if(variants.length>1){const select=document.createElement('select');select.setAttribute('aria-label',`Choose a variant of ${product.title}`);variants.forEach((variant,index)=>{const option=document.createElement('option');option.value=String(index);option.textContent=`${variant.title} · ${formatPrice(variant.price)}`;select.append(option)});select.addEventListener('change',()=>{selected=variants[Number(select.value)]||variants[0];detail.textContent=`${formatPrice(selected.price)} · Available variants`});card.append(select)}
       const actions=document.createElement('div');actions.className='lb-product-actions';
       const view=document.createElement('a');view.href=product.productUrl||'#';view.target='_blank';view.rel='noopener noreferrer';view.textContent='View product';view.addEventListener('click',()=>sendEvent('product_click',product.productId));actions.append(view);
       const add=document.createElement('button');add.type='button';add.textContent='Add to cart';add.addEventListener('click',async()=>{add.disabled=true;add.textContent='Adding…';try{await setCartAttribution();const response=await fetch(`${location.origin}/cart/add.js`,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','Accept':'application/json'},body:JSON.stringify({items:[{id:Number(selected.id),quantity:1}]})});if(!response.ok)throw new Error('Unable to add this item to your cart.');sendEvent('add_to_cart',product.productId);add.textContent='Added ✓';addMessage(`${product.title} was added to your cart.`)}catch(error){add.disabled=false;add.textContent='Try adding again';addMessage(error.message)}});actions.append(add);
@@ -74,6 +93,13 @@
     input.placeholder=value?'Chat is unavailable — please contact the store.':'Ask about products…';
   };
   const showNotice=text=>{if(!text||notice===text)return;notice=text;addMessage(text)};
+  const openHandoff=()=>{leadForm.hidden=false;leadForm.scrollIntoView({block:'nearest',behavior:'smooth'});leadForm.querySelector('[name="email"]').focus();addMessage('I can’t connect a live agent inside this chat, but you can request a personal follow-up from the store here. Your details are only sent if you submit the form and agree to be contacted.')};
+  root.querySelector('.lb-quick-replies').addEventListener('click',event=>{const button=event.target.closest('button');if(!button)return;if(button.dataset.handoff){openHandoff();return}input.value=button.dataset.prompt||'';input.dataset.guidedDiscovery=button.dataset.guided||'';form.requestSubmit()});
+  const showOrderHelp=()=>{
+    addMessage('I can’t access private order records in this chat. For secure tracking, use the order-status link in your Shopify confirmation or shipping email, or sign in to your store account.');
+    const link=document.createElement('a');link.href=`${location.origin}/account`;link.textContent='Open store account';link.target='_blank';link.rel='noopener noreferrer';link.className='lb-order-link';messages.append(link);scroll();
+  };
+  root.querySelector('.lb-lead-toggle').addEventListener('click',()=>{leadForm.hidden=!leadForm.hidden;if(!leadForm.hidden)leadForm.querySelector('[name="email"]').focus()});
   const formatCountdown=milliseconds=>{const total=Math.max(0,Math.ceil(milliseconds/1000));return[Math.floor(total/3600),Math.floor((total%3600)/60),total%60].map(value=>String(value).padStart(2,'0')).join(':')};
   const updateCountdown=()=>{
     if(!countdownMessage||!trialEndsAt)return;
@@ -117,9 +143,15 @@
 
   form.addEventListener('submit',async event=>{
     event.preventDefault();const message=input.value.trim();if(!message||sendButton.disabled||locked)return;
-    addMessage(message,'user');input.value='';sendButton.disabled=true;input.disabled=true;sendButton.textContent='…';setCartAttribution();
+    const guidedDiscovery=input.dataset.guidedDiscovery==='true';delete input.dataset.guidedDiscovery;
+    const apiMessage=guidedDiscovery?`${message} Please ask one focused follow-up question about my needs, intended use, or budget before recommending products.`:message;
+    addMessage(message,'user');input.value='';
+    if(/\b(track|tracking|where.*order|order status)\b/i.test(message)){showOrderHelp();return}
+    if(/\b(human|real person|talk to (?:someone|the store)|speak to (?:someone|a person)|customer service|agent)\b/i.test(message)){openHandoff();return}
+    rememberPreferences(message);sendButton.disabled=true;input.disabled=true;sendButton.textContent='…';setCartAttribution();
     try{
-      const response=await fetch(`${API}/api/storefront/chat`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({shop:store,message,visitorId,conversationId})});
+      const shopperContext=await getShopperContext();
+      const response=await fetch(`${API}/api/storefront/chat`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({shop:store,message:apiMessage,visitorId,conversationId,shopperContext})});
       const data=await response.json().catch(()=>({}));
       if(!response.ok){
         if(data.locked){setLocked(true);showNotice(data.error||'The store assistant is temporarily unavailable.');if(merchantId&&merchantSession){showRechargeButton();refreshStatus()}}
@@ -132,7 +164,6 @@
       makeCards(data.relatedProducts,relatedLabel);
     }catch{addMessage('I’m temporarily unavailable. Please try again shortly.')}finally{sendButton.textContent='➤';if(!locked){sendButton.disabled=false;input.disabled=false;input.focus()}}
   });
-  root.querySelector('.lb-lead-toggle').addEventListener('click',()=>{leadForm.hidden=!leadForm.hidden;if(!leadForm.hidden)leadForm.querySelector('[name="email"]').focus()});
   leadForm.addEventListener('submit',async event=>{
     event.preventDefault();const status=leadForm.querySelector('.lb-lead-status');const submit=leadForm.querySelector('button[type="submit"]');submit.disabled=true;status.textContent='Sending…';
     try{const response=await fetch(`${API}/api/storefront/lead`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({shop:store,visitorId,conversationId,name:leadForm.elements.name.value,email:leadForm.elements.email.value,consent:leadForm.elements.consent.checked})});const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.error||'Unable to send your request.');status.textContent=data.message||'Thanks. The store can follow up with you.';leadForm.reset()}catch(error){status.textContent=error.message}finally{submit.disabled=false}
