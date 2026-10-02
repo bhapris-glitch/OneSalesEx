@@ -14,6 +14,10 @@
 #lb-storefront-root .lb-messages{flex:1;overflow:auto;padding:16px;background:var(--lb-chat-bg)}
 #lb-storefront-root .lb-messages p{max-width:88%;margin:0 0 11px;padding:10px 12px;border-radius:12px;background:#e9eee9;font-size:13px;overflow-wrap:anywhere}
 #lb-storefront-root .lb-messages p.lb-user{margin-left:auto;background:#ffe1e7}
+#lb-storefront-root .lb-quick-replies{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px}
+#lb-storefront-root .lb-quick-replies button{padding:7px 9px;border:1px solid #d8ddd8;border-radius:999px;background:#fff;color:#263026;font:inherit;font-size:11px;cursor:pointer}
+#lb-storefront-root .lb-quick-replies button:hover{border-color:var(--lb-orange)}
+#lb-storefront-root .lb-product-card .lb-product-description{grid-column:1/-1;margin:3px 0;color:#505950;font-size:11px;line-height:1.4}
 #lb-storefront-root .lb-chat-form{display:flex;gap:8px;padding:11px;border-top:1px solid #e2e5e2;background:#fff}
 #lb-storefront-root .lb-chat input{min-width:0;flex:1;padding:11px;border:1px solid #cbd1cb;border-radius:8px;background:#fff;color:#172019;font:inherit;font-size:13px}
 #lb-storefront-root .lb-chat-form button{width:40px;border:0;border-radius:50%;background:var(--lb-orange);color:#fff;font-size:18px;cursor:pointer}
@@ -26,7 +30,9 @@
 #lb-storefront-root .lb-lead-form label input{flex:none;margin:2px 0}
 #lb-storefront-root .lb-lead-form button{padding:9px;border:0;border-radius:7px;background:var(--lb-accent);color:#111;font-size:11px;font-weight:700;cursor:pointer}
 #lb-storefront-root .lb-lead-status{font-size:11px;color:#505950}
-#lb-storefront-root .lb-product-heading{margin:0 0 7px!important;padding:0!important;background:transparent!important;font-size:11px!important;font-weight:700}
+#lb-storefront-root .lb-product-heading{margin:0 0 4px!important;padding:0!important;background:transparent!important;font-size:11px!important;font-weight:700}
+#lb-storefront-root .lb-recommendation-note{margin:0 0 8px!important;padding:0!important;background:transparent!important;color:#505950;font-size:10px!important}
+#lb-storefront-root .lb-order-link{display:inline-block;margin:0 0 12px;padding:8px 10px;border-radius:7px;background:#fff;color:#172019;font-size:12px}
 #lb-storefront-root .lb-product-actions{grid-column:1/-1;display:flex;gap:7px}
 #lb-storefront-root .lb-product-actions a,#lb-storefront-root .lb-product-actions button{flex:1;display:grid;place-items:center;min-height:34px;padding:7px;border:0;border-radius:7px;background:var(--lb-accent);color:#111;text-decoration:none;text-align:center;font-size:10px;font-weight:700;cursor:pointer}
 #lb-storefront-root .lb-product-actions a{background:#eef2ee}
