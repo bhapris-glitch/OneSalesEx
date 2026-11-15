@@ -1,11 +1,11 @@
-# Layboka AI
+# Zavoka AI
 
-Layboka AI is an always-on AI Sales Executive for Shopify merchants. The website helps merchants learn about the product, start a 5-day Premium trial, choose a subscription plan, and manage their AI assistant.
+Zavoka AI is an always-on AI Sales Executive for Shopify merchants. The website helps merchants learn about the product, start a 5-day Premium trial, choose a subscription plan, and manage their AI assistant.
 
 ## Project structure
 
 ```text
-layboka-ai/
+zavoka-ai/
 ├── index.html                  # Landing page, features, calculator, and trial installation form
 ├── pricing.html                # Monthly subscription plans and pricing FAQ
 ├── enterprise.html             # Enterprise consultation form
@@ -15,7 +15,9 @@ layboka-ai/
 ├── privacy.html                # Privacy policy
 ├── dashboard.html              # Merchant settings, usage, and billing
 ├── admin.html                  # Admin metrics overview
-├── vercel.json                 # Frontend-to-API rewrite configuration
+├── vercel.json                 # Frontend-to-Cloud-Run API rewrite (set your service URL)
+├── backend/Dockerfile           # Cloud Run container image definition
+├── backend/.dockerignore        # Excludes local secrets and development files from uploads
 ├── robots.txt                  # Crawler rules and sitemap reference
 ├── sitemap.xml                 # Public SEO URLs
 ├── css/style.css               # Shared theme and responsive layout
@@ -31,13 +33,30 @@ layboka-ai/
     └── .env.example             # Production environment variable template
 ```
 
+## Deploy the backend to Google Cloud Run
+
+The `backend/` directory is a self-contained Cloud Run source upload. It includes a Dockerfile, runtime package manifest, and a `.dockerignore` that keeps local dependencies and secrets out of the image. Deploy the `backend/` directory as the source directory and select the Dockerfile build method. Cloud Run supplies the `PORT` variable; the service listens on port 8080 by default.
+
+Configure the following Cloud Run settings before serving production traffic:
+
+- Allow unauthenticated/public invocation at the Cloud Run service level. The API must receive browser calls and Shopify/Stripe webhooks; access to merchant and admin operations is enforced by the application.
+- Set `FRONTEND_URL` to the exact HTTPS origin of the website (for example, `https://zavoka.com`) so API CORS allows the frontend.
+- Set all backend values listed in `backend/.env.example` as Cloud Run environment variables or, preferably, Secret Manager-backed environment variables for credentials. The example file is a template, not a deployable environment file; replace every placeholder and never upload a real `.env` file or place secrets in source control.
+- Use a production MongoDB URI reachable from the Cloud Run service and set the database name. Do not use `localhost` or `127.0.0.1` for MongoDB in Cloud Run; those addresses refer to the service container, not your development machine or database.
+- Choose a Cloud Run region consistent with your data-location commitments; the runtime region does not automatically set MongoDB's region.
+- After deployment, copy the service's HTTPS URL and replace `YOUR_CLOUD_RUN_SERVICE_URL` in `vercel.json` with its hostname (without a trailing slash). Redeploy the frontend so its `/api/*` requests proxy to Cloud Run.
+- Set Shopify's OAuth callback to `https://zavoka.com/api/shopify/callback` when the frontend proxy is used, and register the Stripe webhook at `https://zavoka.com/api/stripe/webhook`. Point Shopify webhook registrations to the same public API route pattern, or directly to the Cloud Run service URL if your app configuration requires it.
+- Keep at least one Cloud Run instance warm and enable CPU allocation outside request handling while the current in-process scheduled jobs are used. With scale-to-zero or request-only CPU, periodic cart, trial, and catalog jobs may not run reliably. For production workloads that can tolerate scale-to-zero, move these tasks to Cloud Scheduler/Cloud Run Jobs before disabling always-allocated CPU.
+
+Check `GET /api/health` on the deployed Cloud Run URL. It returns HTTP 200 while reporting whether MongoDB is connected; confirm the response has `ok: true` before testing installs, billing, or webhooks. Cloud Run deployment does not deploy the static website; keep the frontend on its static host and route its API calls to the service as described above.
+
 ## Production launch checklist
 
 Before launch, verify all of the following in the deployed environment:
 
 - The frontend is served over HTTPS at the production website URL.
-- The backend is deployed and reachable over HTTPS.
-- The API hostname in `vercel.json` points to the real deployed backend.
+- The backend is deployed on Google Cloud Run and reachable over HTTPS.
+- The API hostname in `vercel.json` points to the real Cloud Run service.
 - The production MongoDB database is reachable by the backend.
 - Stripe is using live-mode credentials and live recurring Prices.
 - The Stripe webhook is delivering events successfully.
@@ -57,7 +76,7 @@ The backend supports real Stripe Checkout subscriptions and signed webhook proce
 Set these values in the backend production environment. Do not commit secrets or a real `.env` file.
 
 ```env
-FRONTEND_URL=https://layboka.ai
+FRONTEND_URL=https://zavoka.com
 
 STRIPE_SECRET_KEY=sk_live_...
 STRIPE_WEBHOOK_SECRET=whsec_...
@@ -77,7 +96,7 @@ The three Price IDs must refer to recurring monthly USD Prices that match the pu
 Register this endpoint in Stripe:
 
 ```text
-POST https://api.layboka.ai/api/stripe/webhook
+POST https://zavoka.com/api/stripe/webhook
 ```
 
 Replace the hostname if the backend is deployed elsewhere. Configure these events:
@@ -131,7 +150,7 @@ SHOPIFY_API_KEY=...
 SHOPIFY_API_SECRET=...
 SHOPIFY_SCOPES=read_products,read_orders,read_checkouts,read_content,read_script_tags,write_script_tags
 SHOPIFY_API_VERSION=2025-01
-SHOPIFY_REDIRECT_URI=https://api.your-domain.com/api/shopify/callback
+SHOPIFY_REDIRECT_URI=https://zavoka.com/api/shopify/callback
 ```
 
 The installation form validates a store domain, creates a 5-day Premium trial with 50 AI chats, and redirects the merchant to Shopify OAuth. The callback validates the OAuth state and Shopify HMAC before storing the access token. It also syncs the initial product catalog, registers Shopify order/checkout/uninstall webhooks, and installs the storefront widget script.
@@ -163,6 +182,11 @@ Product cards let shoppers view products, add available variants to the Shopify 
 
 Dashboard analytics use Shopify order webhooks and checkout actions to show tracked order totals, checkout conversion, revenue, and recovered carts. Order status and tracking links are visible under **Order tracking**.
 
+### Cancellation, uninstall, and data deletion
+
+Merchants cancel recurring billing from **Dashboard → Billing → Cancel subscription**. Stripe confirms cancellation at the end of the current billing period; the dashboard displays that end date. The Sales Executive uninstall action is blocked until an existing paid subscription has cancellation scheduled. Merchants must then confirm app removal in Shopify Admin. Shopify's signed `app/uninstalled` webhook schedules cancellation if needed and removes the merchant's app data from MongoDB. Global platform configuration and non-identifying webhook event IDs are retained; Stripe may retain billing records under its own legal and retention requirements. Deletion only begins after Shopify confirms app removal, and webhook/Stripe failures must be resolved before deletion can complete.
+
+
 ## Trial and access rules
 
 - Trial length: 5 days.
@@ -176,7 +200,7 @@ Optional email variables:
 
 ```env
 RESEND_API_KEY=re_...
-FROM_EMAIL=Layboka AI <notifications@layboka.ai>
+FROM_EMAIL="zavoka AI <notifications@zavoka.com>"
 ```
 
 ## AI chat
@@ -204,7 +228,7 @@ Public SEO files and metadata are included:
 - `sitemap.xml` containing public pages only.
 - `noindex,nofollow` on merchant and admin dashboards.
 
-After deployment, submit `https://layboka.ai/sitemap.xml` to the relevant search console and confirm that the canonical domain, HTTPS redirects, and robots rules resolve correctly.
+After deployment, submit `https://zavoka.com/sitemap.xml` to the relevant search console and confirm that the canonical domain, HTTPS redirects, and robots rules resolve correctly.
 
 ## Link audit
 
@@ -217,12 +241,17 @@ The public navigation and footer link to workspace pages that exist:
 - `contact.html`
 - `terms.html`
 - `privacy.html`
+- `cookies.html`
+- `refunds.html`
+- `dpa.html`
+- `subprocessors.html`
+- `do-not-sell.html`
 - `dashboard.html`
 - `admin.html`
 - `index.html#install`
 - `index.html#features`
 
-The API rewrite is configured in `vercel.json`. Its backend hostname must remain synchronized with the deployed API domain. Email links and external Stripe, Shopify, Gmail, and API links require their corresponding production services to be configured.
+The API rewrite is configured in `vercel.json`; replace `YOUR_CLOUD_RUN_SERVICE_URL` with the actual Cloud Run service hostname before publishing the frontend. Email links and external Stripe, Shopify, Gmail, and API links require their corresponding production services to be configured.
 
 ## Backend API overview
 
@@ -248,6 +277,9 @@ The backend provides:
 - `GET /api/merchant/settings`
 - `PUT /api/merchant/settings`
 - `GET /api/merchant/billing`
+- `GET /api/merchant/cancellation`
+- `POST /api/merchant/cancel-subscription`
+- `POST /api/merchant/uninstall`
 - `POST /api/chat/message`
 - `POST /api/enterprise`
 - `GET /api/admin/metrics`
