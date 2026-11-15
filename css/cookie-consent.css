@@ -1,0 +1,17 @@
+.cookie-consent[hidden],.cookie-consent-options[hidden]{display:none}
+.cookie-consent{position:fixed;z-index:1000;left:20px;right:20px;bottom:20px;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:14px 26px;max-width:1040px;margin:0 auto;padding:20px 22px;border:1px solid #c9cdd1;border-radius:16px;background:rgba(255,255,255,.98);box-shadow:0 14px 48px #171c1130;color:#111;font:14px/1.5 Inter,system-ui,-apple-system,sans-serif}
+.cookie-consent-copy strong{display:block;font-size:16px;color:#111}
+.cookie-consent-copy p{margin:5px 0 0;color:#4d5358;font-size:13px}
+.cookie-consent-copy a{color:#a71936;text-decoration:underline;text-underline-offset:2px}
+.cookie-consent-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px}
+.cookie-consent button{min-height:40px;padding:9px 13px;border:1px solid #b7e33f;border-radius:9px;background:linear-gradient(110deg,#f7e84a,#a9ee47);color:#111;font:inherit;font-size:12px;font-weight:750;cursor:pointer}
+.cookie-consent button:hover{filter:brightness(1.04)}
+.cookie-consent button.cookie-customize{background:#fff;border-color:#bfc4c9}
+.cookie-consent button:focus-visible,.cookie-settings-trigger:focus-visible{outline:3px solid #fa2a55;outline-offset:2px}
+.cookie-consent-options{grid-column:1/-1;display:grid;grid-template-columns:1fr 1fr auto;align-items:center;gap:10px;padding-top:14px;border-top:1px solid #e0e3e5}
+.cookie-consent-options label{display:grid;grid-template-columns:20px 1fr;align-items:center;gap:3px 8px;color:#202428;font-size:12px;font-weight:700}
+.cookie-consent-options input{grid-row:span 2;width:17px;height:17px;margin:0;accent-color:#2b8d43}
+.cookie-consent-options label span{grid-column:2;color:#656b70;font-size:11px;font-weight:400}
+.cookie-settings-trigger{padding:0;border:0;background:none!important;color:#4f5459!important;font:inherit;font-size:13px;text-align:left;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+@media(max-width:760px){.cookie-consent{left:12px;right:12px;bottom:12px;grid-template-columns:1fr;gap:13px;padding:17px}.cookie-consent-actions{justify-content:stretch}.cookie-consent-actions button{flex:1}.cookie-consent-options{grid-template-columns:1fr}.cookie-consent-options button{width:100%}}
+@media(prefers-reduced-motion:reduce){.cookie-consent *{scroll-behavior:auto}}
