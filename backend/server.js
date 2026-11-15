@@ -162,7 +162,7 @@ const syncShopPolicies = async (merchant) => {
   } catch (error) { console.error('Shopify policy sync failed:', error.message); }
 };
 const tokenize = value => String(value || '').toLowerCase().replace(/<[^>]*>/g, ' ').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').split(/[^a-z0-9]+/).filter(word => word.length > 2);
-const findStoreProducts = (products, query, limit = 3, preferredIds = []) => {
+const findStoreProducts = (products, query, limit = 3, preferredIds = [], includeUnavailable = false) => {
   const preferred = new Set(preferredIds.map(String));
   const text = String(query || '').toLowerCase();
   const maxMatch = text.match(/(?:under|below|less than|at most|up to|max(?:imum)?)\s*[$£€]?\s*(\d+(?:[.,]\d+)?)/i);
@@ -170,13 +170,13 @@ const findStoreProducts = (products, query, limit = 3, preferredIds = []) => {
   const explicitPrices = [...text.matchAll(/[$£€]\s*(\d+(?:[.,]\d+)?)/g)].map(match => Number(match[1].replace(',', '.')));
   const ceiling = maxMatch ? Number(maxMatch[1].replace(',', '.')) : (explicitPrices.length ? Math.max(...explicitPrices) : Infinity);
   const floor = minMatch ? Number(minMatch[1].replace(',', '.')) : 0;
-  const stopWords = new Set('under below less than at most up to maximum max over above more least from price find show recommend looking need want with for the and you please product products item items a an i me my is are have has do does can could would should in on of to it its this that'.split(' '));
+  const stopWords = new Set('under below less than at most up to maximum max over above more least from price find show recommend looking need want with for the and you please product products item items a an i me my is are have has do does can could would should in on of to it its this that track tracking stock availability available sold out current real time status check'.split(' '));
   const words = [...new Set(tokenize(text).filter(word => !/^\d+$/.test(word) && !stopWords.has(word)))];
   const browseIntent = /browse|catalog|show (?:me )?(?:all )?(?:products|items)/i.test(text);
   const colorAliases = { black: 'black|charcoal|jet', white: 'white|ivory|cream', red: 'red|crimson|burgundy|maroon', blue: 'blue|navy|teal|turquoise', green: 'green|olive|sage|mint', pink: 'pink|rose|blush', purple: 'purple|violet|lilac', yellow: 'yellow|gold|mustard', orange: 'orange|coral', brown: 'brown|tan|camel|chocolate', beige: 'beige|cream|sand', gray: 'gray|grey|silver|charcoal', grey: 'gray|grey|silver|charcoal', navy: 'navy|blue' };
   const requestedColors = Object.keys(colorAliases).filter(color => new RegExp(`\\b${color}\\b`, 'i').test(text));
   const scored = products.map(product => {
-    const variants = (product.variants || []).filter(variant => variant.available !== false && Number.isFinite(Number(variant.price)) && Number(variant.price) >= floor && Number(variant.price) <= ceiling);
+    const variants = (product.variants || []).filter(variant => (includeUnavailable || variant.available !== false) && Number.isFinite(Number(variant.price)) && Number(variant.price) >= floor && Number(variant.price) <= ceiling);
     if (!variants.length) return null;
     const titleWords = new Set(tokenize(product.title));
     const metadata = `${product.description || ''} ${product.productType || ''} ${product.vendor || ''} ${(product.tags || []).join(' ')} ${(product.collections || []).join(' ')} ${(product.options || []).map(option => `${option.name || ''} ${(option.values || []).join(' ')}`).join(' ')} ${(product.variants || []).map(variant => variant.title || '').join(' ')}`;
@@ -194,6 +194,34 @@ const findStoreProducts = (products, query, limit = 3, preferredIds = []) => {
     return { product, variants, price, score, coverage, hits: hits.length, colorsMatch };
   }).filter(item => item && item.colorsMatch && (words.length === 0 ? (Number.isFinite(ceiling) || floor > 0 || browseIntent) : item.hits > 0 && (item.coverage >= 0.2 || item.hits >= 2)));
   return scored.sort((a, b) => b.score - a.score || b.coverage - a.coverage || a.price - b.price).slice(0, limit).map(({ product, variants, score }) => ({ productId: product.productId, title: product.title, description: String(product.description || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 400), productType: product.productType || '', tags: product.tags || [], productUrl: product.productUrl, image: product.image, variants, score }));
+};
+const fetchLiveStoreProduct = async (merchant, product) => {
+  if (!merchant?.shop || !product?.handle) return null;
+  try {
+    const response = await fetch(`https://${merchant.shop}/products/${encodeURIComponent(product.handle)}.js`, {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(4000)
+    });
+    if (!response.ok) return null;
+    const live = await response.json();
+    if (!Array.isArray(live.variants) || !live.variants.length) return null;
+    const variants = live.variants.map(variant => ({
+      id: String(variant.id),
+      title: String(variant.public_title || variant.title || 'Default Title'),
+      price: (Number(variant.price) / 100).toFixed(2),
+      available: variant.available === true
+    })).filter(variant => Number.isFinite(Number(variant.price)));
+    if (!variants.length) return null;
+    return {
+      title: String(live.title || product.title),
+      description: String(live.description || product.description || '').replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ').trim().slice(0, 400),
+      image: live.featured_image || product.image || '',
+      variants,
+      liveCheckedAt: new Date()
+    };
+  } catch {
+    return null;
+  }
 };
 const getStorePolicies = merchant => [...(merchant.shopPolicies || []), ...(merchant.settings?.businessInfo ? [{ title: 'Store information', body: merchant.settings.businessInfo }] : []), ...(merchant.settings?.shippingPolicy ? [{ title: 'Shipping', body: merchant.settings.shippingPolicy }] : []), ...(merchant.settings?.returnPolicy ? [{ title: 'Returns and exchanges', body: merchant.settings.returnPolicy }] : []), ...(merchant.settings?.faq ? [{ title: 'FAQ', body: merchant.settings.faq }] : []), ...(merchant.settings?.discountRules ? [{ title: 'Merchant approved discounts', body: merchant.settings.discountRules }] : [])].filter(policy => policy.body);
 const getAllowedDiscountCode = rules => String(rules || '').match(/\b(?:code|coupon)\s*[:#-]?\s*([A-Z0-9_-]{3,40})\b/i)?.[1] || '';
@@ -367,17 +395,39 @@ app.post('/api/shopify/webhooks/products-delete', express.raw({ type: 'applicati
 app.post('/api/shopify/webhooks/fulfillments-create', express.raw({ type: 'application/json' }), handleShopifyCommerceWebhook('fulfillments/create'));
 app.post('/api/shopify/webhooks/fulfillments-update', express.raw({ type: 'application/json' }), handleShopifyCommerceWebhook('fulfillments/update'));
 
+const eraseMerchantData = async merchant => {
+  const preservedCollections = new Set(['merchants', 'stripe_events', 'platform_settings']);
+  const collections = await db.listCollections({ type: 'collection' }, { nameOnly: true }).toArray();
+  for (const { name } of collections) {
+    if (preservedCollections.has(name) || name.startsWith('system.')) continue;
+    await db.collection(name).deleteMany({ $or: [{ merchantId: merchant._id }, { merchantId: merchant._id.toString() }, { shop: merchant.shop }] });
+  }
+  await db.collection('merchants').deleteOne({ _id: merchant._id });
+};
+
 app.post('/api/shopify/webhooks/app-uninstalled', express.raw({ type: 'application/json' }), async (req, res) => {
   if (!db || !process.env.SHOPIFY_API_SECRET) return res.sendStatus(503);
   const digest = crypto.createHmac('sha256', process.env.SHOPIFY_API_SECRET).update(req.body).digest('base64');
   const supplied = String(req.headers['x-shopify-hmac-sha256'] || '');
   if (!supplied || digest.length !== supplied.length || !crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(supplied))) return res.sendStatus(401);
   const shop = normalizeShop(req.headers['x-shopify-shop-domain']);
-  if (shop) {
-    const now = new Date();
-    await db.collection('merchants').updateOne({ shop }, { $set: { shopifyConnected: false, uninstalledAt: now, updatedAt: now, 'automation.abandonedCartEnabled': false }, $unset: { shopifyAccessToken: '', shopifyScopes: '' } });
+  if (!shop) return res.sendStatus(400);
+  try {
+    const merchant = await db.collection('merchants').findOne({ shop });
+    if (!merchant) return res.sendStatus(200);
+    if (merchant.stripeSubscriptionId) {
+      if (!stripe) throw new Error('Stripe is unavailable; preserving merchant data until cancellation can be confirmed.');
+      const subscription = await stripe.subscriptions.retrieve(merchant.stripeSubscriptionId);
+      if (!['canceled', 'incomplete_expired'].includes(subscription.status) && subscription.cancel_at_period_end !== true) {
+        await stripe.subscriptions.update(merchant.stripeSubscriptionId, { cancel_at_period_end: true });
+      }
+    }
+    await eraseMerchantData(merchant);
+    return res.sendStatus(200);
+  } catch (error) {
+    console.error('Shopify uninstall cleanup is pending:', error.message);
+    return res.sendStatus(503);
   }
-  res.sendStatus(200);
 });
 
 app.use(express.json({ limit: '100kb' }));
@@ -440,22 +490,115 @@ app.post('/api/merchant/login', requireDb, async (req, res) => {
   json(res, 200, { success: true, merchantId: merchant._id.toString(), session });
 });
 
-app.post('/api/merchant/uninstall', requireDb, requireMerchantSession, async (req, res) => {
+app.get('/api/merchant/cancellation', requireDb, requireMerchantSession, async (req, res) => {
+  const merchant = await db.collection('merchants').findOne({ _id: req.merchantId }, { projection: { subscriptionStatus: 1, cancelAtPeriodEnd: 1, currentPeriodEnd: 1, stripeSubscriptionId: 1 } });
+  if (!merchant) return json(res, 404, { error: 'Merchant account not found.' });
+  json(res, 200, { subscriptionStatus: merchant.subscriptionStatus || 'none', cancelAtPeriodEnd: merchant.cancelAtPeriodEnd === true, currentPeriodEnd: merchant.currentPeriodEnd || null, hasSubscription: Boolean(merchant.stripeSubscriptionId) });
+});
+
+app.post('/api/merchant/cancel-subscription', requireDb, requireMerchantSession, async (req, res) => {
   const merchant = await db.collection('merchants').findOne({ _id: req.merchantId });
   if (!merchant) return json(res, 404, { error: 'Merchant account not found.' });
   const now = new Date();
-  // Shopify does not allow an app to uninstall itself. This disconnects zavoka,
-  // removes stored credentials, and records the request; the merchant can then
-  // confirm removal from Shopify Admin > Settings > Apps and sales channels.
-  await db.collection('merchants').updateOne({ _id: merchant._id }, { $set: { shopifyConnected: false, uninstalledAt: now, uninstallRequestedAt: now, updatedAt: now, 'automation.abandonedCartEnabled': false }, $unset: { shopifyAccessToken: '', shopifyScopes: '' } });
-  await db.collection('activity_events').insertOne({ merchantId: merchant._id, type: 'uninstall_requested', createdAt: now });
-  if (merchant.stripeSubscriptionId && stripe) {
+  if (merchant.stripeSubscriptionId) {
+    if (!stripe) return json(res, 503, { error: 'Subscription cancellation is temporarily unavailable. Please contact support; do not uninstall until cancellation is confirmed.' });
     try {
-      await stripe.subscriptions.update(merchant.stripeSubscriptionId, { cancel_at_period_end: true });
-      await db.collection('merchants').updateOne({ _id: merchant._id }, { $set: { autopay: false, cancelAtPeriodEnd: true, uninstallSubscriptionCanceledAt: now, updatedAt: now } });
-    } catch (error) { console.error('Unable to schedule subscription cancellation during uninstall:', error.message); }
+      let subscription = await stripe.subscriptions.retrieve(merchant.stripeSubscriptionId);
+      if (!['canceled', 'incomplete_expired'].includes(subscription.status) && subscription.cancel_at_period_end !== true) {
+        subscription = await stripe.subscriptions.update(merchant.stripeSubscriptionId, { cancel_at_period_end: true });
+      }
+      const currentPeriodEnd = subscription.current_period_end ? new Date(subscription.current_period_end * 1000) : (merchant.currentPeriodEnd || null);
+      await db.collection('merchants').updateOne({ _id: merchant._id }, { $set: { subscriptionStatus: subscription.status, cancelAtPeriodEnd: subscription.cancel_at_period_end === true, autopay: subscription.cancel_at_period_end !== true, ...(currentPeriodEnd ? { currentPeriodEnd } : {}), cancellationRequestedAt: now, updatedAt: now } });
+      return json(res, 200, { success: true, cancelAtPeriodEnd: subscription.cancel_at_period_end === true, currentPeriodEnd, subscriptionStatus: subscription.status });
+    } catch (error) {
+      console.error('Subscription cancellation failed:', error.message);
+      return json(res, 502, { error: 'Stripe could not confirm cancellation. Please try again or contact support before uninstalling.' });
+    }
   }
-  json(res, 200, { success: true, shop: merchant.shop, message: 'zavoka has been disconnected. Confirm app removal in Shopify Admin > Settings > Apps and sales channels.' });
+  await db.collection('merchants').updateOne({ _id: merchant._id }, { $set: { ...(merchant.trialStatus === 'active' ? { trialStatus: 'ended' } : {}), cancellationRequestedAt: now, updatedAt: now } });
+  json(res, 200, { success: true, cancelAtPeriodEnd: true, currentPeriodEnd: null, subscriptionStatus: 'canceled', trialEnded: merchant.trialStatus === 'active' });
+});
+
+app.get('/api/merchant/plan-change-preview', requireDb, requireMerchantSession, async (req, res) => {
+  const requestedPlan = String(req.query.plan || '');
+  const targetPlan = plans[requestedPlan];
+  if (!targetPlan || !isRealConfigValue(targetPlan.stripePriceId, 'price_')) return json(res, 400, { error: 'Choose a valid, configured subscription plan.' });
+  const merchant = await db.collection('merchants').findOne({ _id: req.merchantId });
+  if (!merchant?.stripeSubscriptionId || !stripe) return json(res, 400, { error: 'An active paid subscription is required to preview a plan change.' });
+  try {
+    const current = await stripe.subscriptions.retrieve(merchant.stripeSubscriptionId);
+    if (!['active', 'trialing'].includes(current.status) || current.cancel_at_period_end) return json(res, 409, { error: 'Resume an active subscription before changing plans.' });
+    if (current.items.data.length !== 1) return json(res, 409, { error: 'This subscription cannot be changed automatically. Please contact support.' });
+    const item = current.items.data[0];
+    const currentPlan = Object.keys(plans).find(key => plans[key].stripePriceId === item.price.id);
+    if (!currentPlan) return json(res, 409, { error: 'The current subscription plan could not be verified. Please contact support.' });
+    if (currentPlan === requestedPlan) return json(res, 400, { error: 'Choose a plan different from your current plan.' });
+    const invoice = await stripe.invoices.retrieveUpcoming({
+      customer: typeof current.customer === 'string' ? current.customer : current.customer.id,
+      subscription: current.id,
+      subscription_items: [{ id: item.id, price: targetPlan.stripePriceId }],
+      subscription_billing_cycle_anchor: 'now',
+      subscription_proration_behavior: 'always_invoice'
+    });
+    return json(res, 200, { plan: requestedPlan, amountDue: invoice.amount_due, currency: invoice.currency || 'usd', nextBillingDate: invoice.period_end ? new Date(invoice.period_end * 1000) : null });
+  } catch (error) {
+    console.error('Subscription plan-change preview failed:', error.message);
+    return json(res, 502, { error: 'Stripe could not calculate the plan-change estimate. No plan change has been made; try again or contact support.' });
+  }
+});
+
+app.post('/api/merchant/change-plan', requireDb, requireMerchantSession, async (req, res) => {
+  const requestedPlan = String(req.body.plan || '');
+  const targetPlan = plans[requestedPlan];
+  if (!targetPlan || !isRealConfigValue(targetPlan.stripePriceId, 'price_')) return json(res, 400, { error: 'Choose a valid, configured subscription plan.' });
+  const merchant = await db.collection('merchants').findOne({ _id: req.merchantId });
+  if (!merchant) return json(res, 404, { error: 'Merchant account not found.' });
+  if (!stripe || !merchant.stripeSubscriptionId) return json(res, 400, { error: 'An active paid subscription is required to change plans.' });
+  try {
+    const current = await stripe.subscriptions.retrieve(merchant.stripeSubscriptionId);
+    if (!['active', 'trialing'].includes(current.status) || current.cancel_at_period_end) return json(res, 409, { error: 'Resume an active subscription before changing plans.' });
+    if (current.items.data.length !== 1) return json(res, 409, { error: 'This subscription cannot be changed automatically. Please contact support.' });
+    const currentItem = current.items.data[0];
+    const currentPlan = Object.keys(plans).find(key => plans[key].stripePriceId === currentItem.price.id);
+    if (!currentPlan) return json(res, 409, { error: 'The current subscription plan could not be verified. Please contact support.' });
+    if (currentPlan === requestedPlan) return json(res, 400, { error: 'This plan is already active.' });
+    const updated = await stripe.subscriptions.update(merchant.stripeSubscriptionId, {
+      items: [{ id: currentItem.id, price: targetPlan.stripePriceId }],
+      billing_cycle_anchor: 'now',
+      proration_behavior: 'always_invoice',
+      payment_behavior: 'error_if_incomplete',
+      metadata: { ...(current.metadata || {}), merchantId: merchant._id.toString(), plan: requestedPlan },
+      expand: ['latest_invoice']
+    });
+    const periodEnd = updated.current_period_end ? new Date(updated.current_period_end * 1000) : null;
+    const invoice = updated.latest_invoice && typeof updated.latest_invoice === 'object' ? updated.latest_invoice : null;
+    await db.collection('merchants').updateOne({ _id: merchant._id }, { $set: { plan: requestedPlan, subscriptionStatus: updated.status, cancelAtPeriodEnd: updated.cancel_at_period_end === true, autopay: updated.cancel_at_period_end !== true, ...(periodEnd ? { currentPeriodEnd: periodEnd } : {}), ...(invoice?.id ? { stripeInvoiceId: invoice.id } : {}), updatedAt: new Date() } });
+    return json(res, 200, { success: true, previousPlan: currentPlan, plan: requestedPlan, currentPeriodEnd: periodEnd, amountDue: invoice?.amount_due ?? null, currency: invoice?.currency || 'usd' });
+  } catch (error) {
+    console.error('Subscription plan change failed:', error.message);
+    return json(res, 502, { error: 'Stripe could not complete or confirm the plan change. Check your payment method; if you see a Stripe invoice, refresh Billing or contact support before retrying.' });
+  }
+});
+
+app.post('/api/merchant/uninstall', requireDb, requireMerchantSession, async (req, res) => {
+  const merchant = await db.collection('merchants').findOne({ _id: req.merchantId });
+  if (!merchant) return json(res, 404, { error: 'Merchant account not found.' });
+  if (merchant.stripeSubscriptionId) {
+    if (!stripe) return json(res, 503, { error: 'Unable to verify subscription cancellation. Please contact support before uninstalling.' });
+    try {
+      const subscription = await stripe.subscriptions.retrieve(merchant.stripeSubscriptionId);
+      if (!['canceled', 'incomplete_expired'].includes(subscription.status) && subscription.cancel_at_period_end !== true) {
+        return json(res, 409, { error: 'Cancel the subscription in Billing before uninstalling the Sales Executive.' });
+      }
+    } catch (error) {
+      console.error('Unable to verify subscription before uninstall:', error.message);
+      return json(res, 502, { error: 'Unable to verify subscription cancellation. Please try again before uninstalling.' });
+    }
+  }
+  const now = new Date();
+  await db.collection('merchants').updateOne({ _id: merchant._id }, { $set: { shopifyConnected: false, uninstallRequestedAt: now, updatedAt: now, 'automation.abandonedCartEnabled': false }, $unset: { shopifyAccessToken: '', shopifyScopes: '' } });
+  await db.collection('activity_events').insertOne({ merchantId: merchant._id, type: 'uninstall_requested', createdAt: now });
+  json(res, 200, { success: true, shop: merchant.shop, deletionPending: true, message: 'The Sales Executive is disconnected. Confirm app removal in Shopify Admin; the app-uninstalled confirmation will trigger data deletion.' });
 });
 
 app.get('/api/merchant/settings', requireDb, requireMerchantSession, async (req, res) => {
@@ -479,6 +622,7 @@ app.get('/api/merchant/settings', requireDb, requireMerchantSession, async (req,
     stripeCustomerId: merchant.stripeCustomerId || null,
     shop: merchant.shop || null,
     shopifyConnected: merchant.shopifyConnected === true,
+    uninstallRequestedAt: merchant.uninstallRequestedAt || null,
     uninstalledAt: merchant.uninstalledAt || null,
     usage: trial ? (merchant.trialChatUsage || 0) : (merchant.chatUsageMonth === new Date().toISOString().slice(0, 7) ? (merchant.chatUsage || 0) : 0),
     limit: getMerchantChatLimit(merchant),
@@ -591,8 +735,21 @@ app.post('/api/storefront/chat', requireDb, async (req, res) => {
     const budgetValue = catalogQuery.match(/(?:under|below|less than|max(?:imum)?|up to)\s*\$?\s*(\d+(?:\.\d+)?)/i)?.[1] || catalogQuery.match(/\$\s*(\d+(?:\.\d+)?)/)?.[1];
     const budgetCeiling = budgetValue ? Number(budgetValue) : Infinity;
     const preferredIds = String(settings.recommendedProductIds || '').split(',').filter(Boolean);
-    const matches = findStoreProducts(allProducts, catalogQuery, 3, preferredIds);
     const lower = message.toLowerCase();
+    const liveProductIntent = /\b(stock|in stock|out of stock|availability|available|sold out|current price|price now|real.?time)\b|\btrack(?:ing)?\b.*\bproduct\b|\bproduct\b.*\btrack(?:ing)?\b/i.test(message);
+    let matches = findStoreProducts(allProducts, catalogQuery, 3, preferredIds, liveProductIntent);
+    if (liveProductIntent && matches.length) {
+      matches = await Promise.all(matches.map(async match => {
+        const source = allProducts.find(product => String(product.productId) === String(match.productId));
+        const live = await fetchLiveStoreProduct(merchant, source);
+        if (!live) return { ...match, liveCheckFailed: true };
+        await db.collection('shop_products').updateOne(
+          { shop: merchant.shop, productId: String(match.productId) },
+          { $set: { ...live, syncedAt: live.liveCheckedAt } }
+        );
+        return { ...match, ...live };
+      }));
+    }
     const discountIntent = /discount|coupon|promo/.test(lower);
     const policyIntent = /ship(?:ping)?|delivery|return|refund|exchange|warranty|payment|policy|policies|discount|coupon|promo/.test(lower);
     const policyTerms = /discount|coupon|promo/.test(lower) ? /discount|coupon|promo/ : /ship(?:ping)?|delivery/.test(lower) ? /ship(?:ping)?|delivery/ : /return|refund|exchange/.test(lower) ? /return|refund|exchange/ : /payment/.test(lower) ? /payment/ : /warranty/.test(lower) ? /warranty/ : /policy|policies/.test(lower) ? /.*/ : /shipping|return|refund|exchange|payment|warranty/;
