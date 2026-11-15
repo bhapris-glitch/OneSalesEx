@@ -57,19 +57,22 @@
     const note=document.createElement('p');note.className='lb-recommendation-note';note.textContent='Picked from this store’s synced product catalog using your request and shopping context. Check the product page for the latest details.';messages.append(note);
     const grid=document.createElement('div');grid.className='lb-product-grid';
     products.slice(0,3).forEach(product=>{
-      const variants=(product.variants||[]).filter(variant=>variant.available!==false);
+      const variants=product.variants||[];
       if(!variants.length)return;
-      let selected=variants[0];
+      let selected=variants.find(variant=>variant.available!==false)||variants[0];
       const card=document.createElement('article');card.className='lb-product-card';
       if(product.image){const image=document.createElement('img');image.src=product.image;image.alt='';image.loading='lazy';card.append(image)}
       const title=document.createElement('strong');title.textContent=product.title;card.append(title);
-      const detail=document.createElement('small');detail.className='lb-product-price';detail.textContent=`${formatPrice(selected.price)} · Available variants`;card.append(detail);
+      const detail=document.createElement('small');detail.className='lb-product-price';
+      const liveCheckTime=product.liveCheckedAt?new Date(product.liveCheckedAt).toLocaleTimeString():'';
+      const updateVariantStatus=()=>{detail.textContent=`${formatPrice(selected.price)} · ${selected.available===false?'Currently unavailable':'Available'}${liveCheckTime?` · Live checked ${liveCheckTime}`:''}${product.liveCheckFailed?' · Live check unavailable':''}`};
+      updateVariantStatus();card.append(detail);
       const description=String(product.description||'').trim();if(description){const summary=document.createElement('p');summary.className='lb-product-description';summary.textContent=description.length>150?`${description.slice(0,147)}…`:description;card.append(summary)}
-      if(variants.length>1){const select=document.createElement('select');select.setAttribute('aria-label',`Choose a variant of ${product.title}`);variants.forEach((variant,index)=>{const option=document.createElement('option');option.value=String(index);option.textContent=`${variant.title} · ${formatPrice(variant.price)}`;select.append(option)});select.addEventListener('change',()=>{selected=variants[Number(select.value)]||variants[0];detail.textContent=`${formatPrice(selected.price)} · Available variants`});card.append(select)}
+      if(variants.length>1){const select=document.createElement('select');select.setAttribute('aria-label',`Choose a variant of ${product.title}`);variants.forEach((variant,index)=>{const option=document.createElement('option');option.value=String(index);option.textContent=`${variant.title} · ${formatPrice(variant.price)} · ${variant.available===false?'Unavailable':'Available'}`;select.append(option)});select.value=String(variants.indexOf(selected));select.addEventListener('change',()=>{selected=variants[Number(select.value)]||variants[0];updateVariantStatus();add.disabled=selected.available===false;buy.disabled=selected.available===false});card.append(select)}
       const actions=document.createElement('div');actions.className='lb-product-actions';
       const view=document.createElement('a');view.href=product.productUrl||'#';view.target='_blank';view.rel='noopener noreferrer';view.textContent='View product';view.addEventListener('click',()=>sendEvent('product_click',product.productId));actions.append(view);
-      const add=document.createElement('button');add.type='button';add.textContent='Add to cart';add.addEventListener('click',async()=>{add.disabled=true;add.textContent='Adding…';try{await setCartAttribution();const response=await fetch(`${location.origin}/cart/add.js`,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','Accept':'application/json'},body:JSON.stringify({items:[{id:Number(selected.id),quantity:1}]})});if(!response.ok)throw new Error('Unable to add this item to your cart.');sendEvent('add_to_cart',product.productId);add.textContent='Added ✓';addMessage(`${product.title} was added to your cart.`)}catch(error){add.disabled=false;add.textContent='Try adding again';addMessage(error.message)}});actions.append(add);
-      const buy=document.createElement('button');buy.type='button';buy.textContent='Checkout →';buy.addEventListener('click',async()=>{buy.disabled=true;buy.textContent='Opening checkout…';try{const response=await fetch(`${API}/api/storefront/checkout`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({shop:store,visitorId,conversationId,discountCode:activeDiscountCode,items:[{variantId:selected.id,quantity:1}]})});const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.error||'Unable to start checkout.');location.assign(data.checkoutUrl)}catch(error){buy.disabled=false;buy.textContent='Try checkout again';addMessage(error.message)}});actions.append(buy);card.append(actions);grid.append(card);
+      const add=document.createElement('button');add.type='button';add.textContent='Add to cart';add.disabled=selected.available===false;add.addEventListener('click',async()=>{add.disabled=true;add.textContent='Adding…';try{await setCartAttribution();const response=await fetch(`${location.origin}/cart/add.js`,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','Accept':'application/json'},body:JSON.stringify({items:[{id:Number(selected.id),quantity:1}]})});if(!response.ok)throw new Error('Unable to add this item to your cart.');sendEvent('add_to_cart',product.productId);add.textContent='Added ✓';addMessage(`${product.title} was added to your cart.`)}catch(error){add.disabled=false;add.textContent='Try adding again';addMessage(error.message)}});actions.append(add);
+      const buy=document.createElement('button');buy.type='button';buy.textContent='Checkout →';buy.disabled=selected.available===false;buy.addEventListener('click',async()=>{buy.disabled=true;buy.textContent='Opening checkout…';try{const response=await fetch(`${API}/api/storefront/checkout`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({shop:store,visitorId,conversationId,discountCode:activeDiscountCode,items:[{variantId:selected.id,quantity:1}]})});const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.error||'Unable to start checkout.');location.assign(data.checkoutUrl)}catch(error){buy.disabled=false;buy.textContent='Try checkout again';addMessage(error.message)}});actions.append(buy);card.append(actions);grid.append(card);
     });
     if(grid.childElementCount){messages.append(grid);scroll()}
   };
@@ -114,7 +117,22 @@
   const showRechargeButton=()=>{
     if(messages.querySelector('.lb-recharge-action'))return;
     const wrapper=document.createElement('p');wrapper.className='lb-assistant lb-recharge-action';
-    const button=document.createElement('button');button.type='button';button.textContent='RECHARGE NOW';button.addEventListener('click',()=>location.assign('dashboard.html?tab=billing'));
+    const button=document.createElement('button');button.type='button';button.textContent='RECHARGE PREMIUM →';
+    button.addEventListener('click',async()=>{
+      button.disabled=true;button.textContent='Opening secure checkout…';
+      try{
+        let email=localStorage.getItem('lbLoginEmail')||'';
+        if(merchantId&&merchantSession){
+          const billing=await fetch(`${API}/api/merchant/billing?merchantId=${encodeURIComponent(merchantId)}`,{headers:{'x-merchant-session':merchantSession}});
+          if(billing.ok){const details=await billing.json();email=details.email||email}
+        }
+        if(!email)throw new Error('Please sign in to your merchant account to continue to Premium checkout.');
+        const response=await fetch(`${API}/api/checkout`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({plan:'premium',email,merchantId})});
+        const data=await response.json().catch(()=>({}));
+        if(!response.ok||!data.url)throw new Error(data.error||'Premium checkout is temporarily unavailable. Please try again.');
+        location.assign(data.url);
+      }catch(error){button.disabled=false;button.textContent='RECHARGE PREMIUM →';addMessage(error.message)}
+    });
     wrapper.append(button);messages.append(wrapper);scroll();
   };
   const applyStatus=data=>{
@@ -146,7 +164,7 @@
     const guidedDiscovery=input.dataset.guidedDiscovery==='true';delete input.dataset.guidedDiscovery;
     const apiMessage=guidedDiscovery?`${message} Please ask one focused follow-up question about my needs, intended use, or budget before recommending products.`:message;
     addMessage(message,'user');input.value='';
-    if(/\b(track|tracking|where.*order|order status)\b/i.test(message)){showOrderHelp();return}
+    if(/\b(order|shipment|package)\b.*\b(track|tracking|where|status)\b|\b(track|tracking)\b.*\b(order|shipment|package)\b|\bwhere.*order\b|\border status\b/i.test(message)){showOrderHelp();return}
     if(/\b(human|real person|talk to (?:someone|the store)|speak to (?:someone|a person)|customer service|agent)\b/i.test(message)){openHandoff();return}
     rememberPreferences(message);sendButton.disabled=true;input.disabled=true;sendButton.textContent='…';setCartAttribution();
     try{
