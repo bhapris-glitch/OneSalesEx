@@ -1,0 +1,14 @@
+# Local dependencies and runtime artifacts
+node_modules
+npm-debug.log*
+*.log
+
+# Never include local credentials in the Cloud Run image
+.env
+.env.*
+!.env.example
+
+# Editor and OS files
+.DS_Store
+.vscode
+.idea
